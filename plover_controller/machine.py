@@ -593,7 +593,10 @@ class ControllerMachine(ThreadedStenotypeBase):
         if not self._unsequenced_buttons and not self._pending_keys:
             return
         if any(
-            map(lambda v: abs(v) > self._params["stroke_end_threshold"], self._stick_states.values())
+            map(
+                lambda v: abs(v) > self._params["stroke_end_threshold"],
+                self._stick_states.values(),
+            )
         ):
             return
         if any(map(lambda v: v > 0, self._trigger_states.values())):
