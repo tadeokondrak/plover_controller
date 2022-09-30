@@ -69,7 +69,7 @@ from sdl2 import (
     SDL_JoystickNumHats,
     SDL_JoystickOpen,
     SDL_NumJoysticks,
-    SDL_QuitSubSystem,
+    SDL_Quit,
     SDL_SetHint,
     SDL_WaitEventTimeout,
     SDL_WasInit,
@@ -464,11 +464,11 @@ right(ur,u,ul,u) -> -FL
 """
 
 
-def sdl_ensure_init(reinitialize=False):
+def sdl_init(reinitialize=False):
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, b"1")
     SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, b"1")
     if reinitialize:
-        SDL_QuitSubSystem(SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER)
+        SDL_Quit()
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER)
 
 
@@ -646,7 +646,7 @@ class ControllerMachine(ThreadedStenotypeBase):
             inorder_list.append(segment_name)
 
     def start_capture(self):
-        sdl_ensure_init(reinitialize=False)
+        sdl_init()
         for i in range(SDL_NumJoysticks()):
             if not SDL_IsGameController(i):
                 continue
@@ -667,6 +667,7 @@ class ControllerMachine(ThreadedStenotypeBase):
             self._controller = None
             self._joystick = None
             self._controller_instance_id = None
+        SDL_Quit()
         super().stop_capture()
 
     @classmethod
@@ -803,13 +804,13 @@ class ControllerOption(QGroupBox):
                 self._mapping_text_edit.setPlainText(mapping)
 
     def populate_devices(self):
-        sdl_ensure_init(reinitialize=False)
+        sdl_init(reinitialize=False)
         self._joysticks = enumerate_joysticks()
         for joystick in self._joysticks.values():
             self._device_selector.addItem(joystick.name, joystick.guid)
 
     def refresh_devices(self):
-        sdl_ensure_init(reinitialize=True)
+        sdl_init(reinitialize=True)
         self._device_selector.clear()
         self._joysticks = enumerate_joysticks()
         for joystick in self._joysticks.values():
