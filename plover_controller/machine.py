@@ -691,7 +691,7 @@ class JoystickInfo:
     n_buttons: int
 
 
-def enumerate_joysticks() -> dict[str, JoystickInfo]:
+def enumerate_joysticks():
     joysticks = {}
     for i in range(SDL_NumJoysticks()):
         if not SDL_IsGameController(i):
