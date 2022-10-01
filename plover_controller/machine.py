@@ -17,7 +17,6 @@
 
 import ctypes
 import re
-from plover.steno import Stroke
 from copy import copy
 from dataclasses import dataclass
 from math import atan2, floor, hypot, sqrt, tau
@@ -76,6 +75,23 @@ from sdl2 import (
 )
 
 
+def get_keys_for_stroke(stroke_str):
+    passed_hyphen = False
+    keys = []
+    no_hyphen_keys = {"*", "#"}
+    for key in stroke_str:
+        if key == "-":
+            passed_hyphen = True
+            continue
+        if key in no_hyphen_keys:
+            keys.append(key)
+        elif passed_hyphen:
+            keys.append(f"-{key}")
+        else:
+            keys.append(f"{key}-")
+    return tuple(keys)
+
+
 def parse_mappings(text):
     stick_segment_counts = {}
     stick_offsets = {}
@@ -93,11 +109,13 @@ def parse_mappings(text):
             stick_offsets[match[1]] = float(match[3])
             stick_directions[match[1]] = match[4].split(",")
         elif match := re.match(r"([a-z0-9,]+) -> ([A-Z-*#]+)", line):
-            unordered_mappings.append((match[1].split(","), Stroke(match[2]).keys()))
+            unordered_mappings.append(
+                (match[1].split(","), get_keys_for_stroke(match[2]))
+            )
         elif match := re.match(r"(left|right)\(([a-z,]+)\) -> ([A-Z-*#]+)", line):
             ordered_mappings[
                 tuple(f"{match[1]}{pos}" for pos in match[2].split(","))
-            ] = Stroke(match[3]).keys()
+            ] = get_keys_for_stroke(match[3])
         else:
             print(f"don't know how to parse '{line}', skipping")
     return (
