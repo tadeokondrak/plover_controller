@@ -487,7 +487,7 @@ def sdl_init(reinitialize=False):
     SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, b"1")
     if reinitialize:
         SDL_Quit()
-    SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER)
+    SDL_Init(SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER)
 
 
 def buttons_to_keys(in_keys, unordered_mappings):
