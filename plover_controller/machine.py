@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from math import atan2, floor, hypot, sqrt, tau
 from PyQt5.QtCore import QVariant, pyqtSignal, Qt
 from PyQt5.QtGui import QFont
+from plover.resource import resource_exists, resource_filename
 from plover.machine.base import ThreadedStenotypeBase
 from PyQt5.QtWidgets import (
     QComboBox,
@@ -42,6 +43,7 @@ from sdl2 import (
     SDL_CONTROLLERBUTTONUP,
     SDL_CONTROLLERDEVICEREMOVED,
     SDL_Event,
+    SDL_GameControllerAddMappingsFromFile,
     SDL_GameControllerClose,
     SDL_GameControllerGetJoystick,
     SDL_GameControllerGetStringForAxis,
@@ -488,6 +490,12 @@ def sdl_init(reinitialize=False):
     if reinitialize:
         SDL_Quit()
     SDL_Init(SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER)
+    db_path = "asset:plover_controller:assets/gamecontrollerdb.txt"
+    if resource_exists(db_path):
+        if SDL_GameControllerAddMappingsFromFile(resource_filename(db_path).encode("utf-8")) == -1:
+            print("SDL couldn't load gamecontrollerdb")
+    else:
+        print("couldn't find gamecontrollerdb")
 
 
 def buttons_to_keys(in_keys, unordered_mappings):
