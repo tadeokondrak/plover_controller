@@ -52,7 +52,6 @@ from sdl2 import (
     SDL_GetError,
     SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS,
     SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS,
-    SDL_HINT_JOYSTICK_HIDAPI,
     SDL_HINT_NO_SIGNAL_HANDLERS,
     SDL_Init,
     SDL_INIT_GAMECONTROLLER,
@@ -489,7 +488,7 @@ def sdl_init(reinitialize=False):
     SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, b"1")
     if reinitialize:
         SDL_Quit()
-    SDL_Init(SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER)
+    SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER)
     db_path = "asset:plover_controller:assets/gamecontrollerdb.txt"
     if resource_exists(db_path):
         if SDL_GameControllerAddMappingsFromFile(resource_filename(db_path).encode("utf-8")) == -1:
