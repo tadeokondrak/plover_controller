@@ -40,23 +40,11 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 from sdl2 import (
-    SDL_CONTROLLERAXISMOTION,
-    SDL_CONTROLLERBUTTONDOWN,
-    SDL_CONTROLLERBUTTONUP,
-    SDL_CONTROLLERDEVICEREMOVED,
     SDL_Event,
-    SDL_GameControllerAddMappingsFromFile,
-    SDL_GameControllerClose,
-    SDL_GameControllerGetJoystick,
-    SDL_GameControllerGetStringForAxis,
-    SDL_GameControllerGetStringForButton,
-    SDL_GameControllerOpen,
     SDL_GetError,
-    SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS,
     SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS,
     SDL_HINT_NO_SIGNAL_HANDLERS,
     SDL_Init,
-    SDL_INIT_GAMECONTROLLER,
     SDL_INIT_JOYSTICK,
     SDL_INIT_VIDEO,
     SDL_IsGameController,
@@ -188,25 +176,6 @@ def parse_mappings(text):
     )
 
 
-def sdl_init(reinitialize=False):
-    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, b"1")
-    SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, b"1")
-    if reinitialize:
-        SDL_Quit()
-    SDL_Init(SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER)
-    db_path = "asset:plover_controller:assets/gamecontrollerdb.txt"
-    if resource_exists(db_path):
-        if (
-            SDL_GameControllerAddMappingsFromFile(
-                resource_filename(db_path).encode("utf-8")
-            )
-            == -1
-        ):
-            print("SDL couldn't load gamecontrollerdb")
-    else:
-        print("couldn't find gamecontrollerdb")
-
-
 def buttons_to_keys(in_keys, unordered_mappings):
     keys = set()
     for chord, result in unordered_mappings:
@@ -240,7 +209,7 @@ class ControllerThread(threading.Thread):
         SDL_Quit()
         SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, b"1")
         SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, b"1")
-        SDL_Init(SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER)
+        SDL_Init(SDL_INIT_JOYSTICK)
 
         for i in range(SDL_NumJoysticks()):
             js = SDL_JoystickOpen(i)
