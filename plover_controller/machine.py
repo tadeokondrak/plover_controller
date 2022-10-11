@@ -18,6 +18,7 @@ import sdl2
 import threading
 import ctypes
 import re
+import plover
 from copy import copy
 from dataclasses import dataclass
 from math import atan2, floor, hypot, sqrt, tau
@@ -27,6 +28,7 @@ from PyQt5.QtGui import QFont
 from plover.resource import resource_exists, resource_filename
 from plover.machine.base import StenotypeBase
 from PyQt5.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
@@ -44,10 +46,26 @@ from sdl2 import (
     SDL_GetError,
     SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS,
     SDL_HINT_NO_SIGNAL_HANDLERS,
+    SDL_HINT_JOYSTICK_HIDAPI,
+    SDL_HINT_JOYSTICK_RAWINPUT,
+    SDL_HINT_JOYSTICK_RAWINPUT_CORRELATE_XINPUT,
+    SDL_HINT_JOYSTICK_THREAD,
     SDL_Init,
     SDL_INIT_JOYSTICK,
     SDL_INIT_VIDEO,
     SDL_IsGameController,
+    SDL_JoyAxisEvent,
+    SDL_JOYAXISMOTION,
+    SDL_JoyBallEvent,
+    SDL_JOYBALLMOTION,
+    SDL_JOYBUTTONDOWN,
+    SDL_JoyButtonEvent,
+    SDL_JOYBUTTONUP,
+    SDL_JOYDEVICEADDED,
+    SDL_JoyDeviceEvent,
+    SDL_JOYDEVICEREMOVED,
+    SDL_JoyHatEvent,
+    SDL_JOYHATMOTION,
     SDL_JoystickClose,
     SDL_JoystickGetGUID,
     SDL_JoystickGetGUIDString,
@@ -59,24 +77,18 @@ from sdl2 import (
     SDL_JoystickNumHats,
     SDL_JoystickOpen,
     SDL_NumJoysticks,
+    SDL_PushEvent,
     SDL_Quit,
+    SDL_RegisterEvents,
     SDL_SetHint,
     SDL_WaitEvent,
     SDL_WaitEventTimeout,
     SDL_WasInit,
-    SDL_JOYAXISMOTION,
-    SDL_JOYBALLMOTION,
-    SDL_JOYHATMOTION,
-    SDL_JOYBUTTONDOWN,
-    SDL_JOYBUTTONUP,
-    SDL_JOYDEVICEADDED,
-    SDL_JOYDEVICEREMOVED,
-    SDL_JoyAxisEvent,
-    SDL_JoyBallEvent,
-    SDL_JoyHatEvent,
-    SDL_JoyButtonEvent,
-    SDL_JoyDeviceEvent,
+    SDL_free,
+    SDL_memset,
 )
+
+SDL_strdup_void = sdl2.dll._bind("SDL_strdup", [ctypes.c_char_p], ctypes.c_void_p)
 
 mapping_path = "asset:plover_controller:assets/default_mapping.txt"
 if not resource_exists(mapping_path):
@@ -200,32 +212,42 @@ def get_controller_thread():
 
 class ControllerThread(threading.Thread):
     lock = threading.Lock()
+    set_hint_event_type = None
     listeners: Set[Callable[[SDL_Event], None]] = set()
 
     def __init__(self):
         super().__init__()
 
     def run(self):
-        SDL_Quit()
-        SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, b"1")
-        SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, b"1")
-        SDL_Init(SDL_INIT_JOYSTICK)
+        with self.lock:
+            SDL_Quit()
+            SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, b"1")
+            SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, b"1")
+            SDL_Init(SDL_INIT_JOYSTICK)
+            self.set_hint_event_type = SDL_RegisterEvents(1)
 
-        for i in range(SDL_NumJoysticks()):
-            js = SDL_JoystickOpen(i)
+            for i in range(SDL_NumJoysticks()):
+                js = SDL_JoystickOpen(i)
 
         event = SDL_Event()
         while True:
             if not SDL_WaitEvent(event):
-
                 error = SDL_GetError()
                 if error:
                     raise Exception(f"SDL error occurred: {error.decode('utf-8')}")
                 else:
                     raise Exception("Unknown SDL error occurred")
             with self.lock:
-                for listener in self.listeners:
-                    listener(event)
+                if event.type == self.set_hint_event_type:
+                    SDL_SetHint(
+                        ctypes.cast(event.user.data1, ctypes.c_char_p),
+                        ctypes.cast(event.user.data2, ctypes.c_char_p),
+                    )
+                    SDL_free(event.user.data1)
+                    SDL_free(event.user.data2)
+                else:
+                    for listener in self.listeners:
+                        listener(event)
 
     def add_listener(self, listener: Callable[[SDL_Event], None]):
         with self.lock:
@@ -234,6 +256,14 @@ class ControllerThread(threading.Thread):
     def remove_listener(self, listener: Callable[[SDL_Event], None]):
         with self.lock:
             self.listeners.remove(listener)
+
+    def set_hint(self, name, value):
+        with self.lock:
+            event = SDL_Event()
+            event.type = self.set_hint_event_type
+            event.user.data1 = SDL_strdup_void(name)
+            event.user.data2 = SDL_strdup_void(value)
+            SDL_PushEvent(event)
 
 
 class ControllerMachine(StenotypeBase):
@@ -274,6 +304,17 @@ class ControllerMachine(StenotypeBase):
     def start_capture(self):
         self._initializing()
         get_controller_thread().add_listener(self._handle_sdl_event)
+        hints = [
+            (SDL_HINT_JOYSTICK_HIDAPI, self._params["use_hidapi"]),
+            (SDL_HINT_JOYSTICK_RAWINPUT, self._params["use_rawinput"]),
+            (
+                SDL_HINT_JOYSTICK_RAWINPUT_CORRELATE_XINPUT,
+                self._params["correlate_rawinput"],
+            ),
+            (SDL_HINT_JOYSTICK_THREAD, self._params["use_joystick_thread"]),
+        ]
+        for name, value in hints:
+            get_controller_thread().set_hint(name, b"1" if value else b"0")
         self._ready()
 
     def stop_capture(self):
@@ -288,6 +329,10 @@ class ControllerMachine(StenotypeBase):
             "stick_dead_zone": (0.6, float),
             "trigger_dead_zone": (0.9, float),
             "stroke_end_threshold": (0.4, float),
+            "use_hidapi": (True, plover.misc.boolean),
+            "use_rawinput": (False, plover.misc.boolean),
+            "correlate_rawinput": (False, plover.misc.boolean),
+            "use_joystick_thread": (False, plover.misc.boolean),
         }
 
     def _handle_sdl_event(self, event: SDL_Event):
@@ -342,7 +387,10 @@ class ControllerMachine(StenotypeBase):
             if any(
                 map(
                     lambda v: abs(v) > self._params["stroke_end_threshold"],
-                    (self._stick_states.get(axis, 0.0) for axis in [stick.x_axis, stick.y_axis]),
+                    (
+                        self._stick_states.get(axis, 0.0)
+                        for axis in [stick.x_axis, stick.y_axis]
+                    ),
                 )
             ):
                 continue
@@ -414,12 +462,30 @@ class ControllerMachine(StenotypeBase):
 
 
 class ControllerOption(QGroupBox):
-    message = pyqtSignal(str)
+    axis_message = pyqtSignal(str)
+    other_message = pyqtSignal(str)
     valueChanged = pyqtSignal(QVariant)
     _value = {}
     _joystick = None
     _joysticks = {}
-    _last_message = None
+    _last_axis_message = None
+    _last_other_message = None
+    _spin_boxes = {}
+    _check_boxes = {}
+
+    SPIN_BOXES = {
+        "timeout": "Timeout:",
+        "stick_dead_zone": "Stick dead zone:",
+        "trigger_dead_zone": "Trigger dead zone:",
+        "stroke_end_threshold": "Stroke end threshold:",
+    }
+
+    CHECK_BOXES = {
+        "use_hidapi": "Use hidapi drivers:\n(reconnect controller and/or restart after change)",
+        "use_rawinput": "Use rawinput drivers:\n(reconnect controller and/or restart after change)",
+        "correlate_rawinput": "Correlate rawinput and xinput data:\n(reconnect controller and/or restart after change)",
+        "use_joystick_thread": "Use joystick thread:\n(restart after change)",
+    }
 
     def __init__(self):
         super().__init__()
@@ -427,41 +493,35 @@ class ControllerOption(QGroupBox):
 
         self._form_layout = QFormLayout(self)
 
-        self._timeout_label = QLabel("Timeout:", self)
-        self._timeout_double_spin_box = QDoubleSpinBox(self)
-        self._timeout_double_spin_box.setSingleStep(0.1)
-        self._timeout_double_spin_box.valueChanged.connect(self.timeout_changed)
-        self._form_layout.addRow(self._timeout_label, self._timeout_double_spin_box)
+        for property, description in __class__.SPIN_BOXES.items():
 
-        self._stick_dead_zone_label = QLabel("Stick dead zone:", self)
-        self._stick_dead_zone_double_spin_box = QDoubleSpinBox(self)
-        self._stick_dead_zone_double_spin_box.setSingleStep(0.1)
-        self._stick_dead_zone_double_spin_box.valueChanged.connect(
-            self.stick_dead_zone_changed
-        )
-        self._form_layout.addRow(
-            self._stick_dead_zone_label, self._stick_dead_zone_double_spin_box
-        )
+            def value_changed(value, property=property):
+                if value == self._value.get(property):
+                    return
+                self._value[property] = value
+                self.valueChanged.emit(self._value)
 
-        self._trigger_dead_zone_label = QLabel("Trigger dead zone:", self)
-        self._trigger_dead_zone_double_spin_box = QDoubleSpinBox(self)
-        self._trigger_dead_zone_double_spin_box.setSingleStep(0.1)
-        self._trigger_dead_zone_double_spin_box.valueChanged.connect(
-            self.trigger_dead_zone_changed
-        )
-        self._form_layout.addRow(
-            self._trigger_dead_zone_label, self._trigger_dead_zone_double_spin_box
-        )
+            label = QLabel(description, self)
+            spin_box = QDoubleSpinBox(self)
+            spin_box.setSingleStep(0.1)
+            spin_box.valueChanged.connect(value_changed)
+            self._form_layout.addRow(label, spin_box)
+            self._spin_boxes[property] = spin_box
 
-        self._stroke_end_threshold_label = QLabel("Stroke end threshold:", self)
-        self._stroke_end_threshold_double_spin_box = QDoubleSpinBox(self)
-        self._stroke_end_threshold_double_spin_box.setSingleStep(0.1)
-        self._stroke_end_threshold_double_spin_box.valueChanged.connect(
-            self.stroke_end_threshold_changed
-        )
-        self._form_layout.addRow(
-            self._stroke_end_threshold_label, self._stroke_end_threshold_double_spin_box
-        )
+        for property, description in __class__.CHECK_BOXES.items():
+
+            def state_changed(state, property=property):
+                value = state == Qt.Checked
+                if value == self._value.get(property):
+                    return
+                self._value[property] = value
+                self.valueChanged.emit(self._value)
+
+            label = QLabel(description, self)
+            check_box = QCheckBox(self)
+            check_box.stateChanged.connect(state_changed)
+            self._form_layout.addRow(label, check_box)
+            self._check_boxes[property] = check_box
 
         self._mapping_label = QLabel("Mapping:", self)
         self._mapping_text_edit = QTextEdit(self)
@@ -474,12 +534,18 @@ class ControllerOption(QGroupBox):
         self._mapping_layout.addWidget(self._mapping_reset_button)
         self._form_layout.addRow(self._mapping_label, self._mapping_layout)
 
-        self._feedback_label = QLabel("Last event:", self)
+        self._axis_feedback_label = QLabel("Last axis event:", self)
+        self._axis_feedback_output_label = QLabel(self)
+        self._axis_feedback_output_label.setFont(QFont("Monospace"))
+        self._form_layout.addRow(self._axis_feedback_label, self._axis_feedback_output_label)
+        self.axis_message.connect(self._axis_feedback_output_label.setText)
+
+        self._feedback_label = QLabel("Last other event:", self)
         self._feedback_output_label = QLabel(self)
         self._feedback_output_label.setFont(QFont("Monospace"))
         self._form_layout.addRow(self._feedback_label, self._feedback_output_label)
+        self.other_message.connect(self._feedback_output_label.setText)
 
-        self.message.connect(self._feedback_output_label.setText)
         get_controller_thread().add_listener(self._handle_sdl_event)
 
     def __del__(self):
@@ -487,8 +553,18 @@ class ControllerOption(QGroupBox):
 
     def _handle_sdl_event(self, event: SDL_Event):
         if event.type == SDL_JOYAXISMOTION:
+            if event.jaxis.value / 32768 < 0.25:
+                return
             message = f"Axis {event.jaxis.axis} motion (device: {event.jaxis.which})"
-        elif event.type == SDL_JOYBALLMOTION:
+            if message != self._last_axis_message:
+                try:
+                    self.axis_message.emit(message)
+                except RuntimeError:
+                    pass
+            self._last_axis_message = message
+            return
+
+        if event.type == SDL_JOYBALLMOTION:
             message = f"Ball {event.jball.ball} motion (device: {event.jball.which})"
         elif event.type == SDL_JOYHATMOTION:
             message = f"Hat {event.jhat.hat} motion (device: {event.jhat.which})"
@@ -504,51 +580,28 @@ class ControllerOption(QGroupBox):
             message = f"Device {event.jdevice.which} removed"
         else:
             return
-        if message != self._last_message:
+        if message != self._last_other_message:
             try:
-                self.message.emit(message)
+                self.other_message.emit(message)
             except RuntimeError:
                 pass
-        self._last_message = message
+        self._last_other_message = message
 
     def setValue(self, value):
         self._value = copy(value)
-        if timeout := value.get("timeout"):
-            self._timeout_double_spin_box.setValue(timeout)
-        if stick_dead_zone := value.get("stick_dead_zone"):
-            self._stick_dead_zone_double_spin_box.setValue(stick_dead_zone)
-        if trigger_dead_zone := value.get("trigger_dead_zone"):
-            self._trigger_dead_zone_double_spin_box.setValue(trigger_dead_zone)
-        if stroke_end_threshold := value.get("stroke_end_threshold"):
-            self._stroke_end_threshold_double_spin_box.setValue(stroke_end_threshold)
+        for property in __class__.SPIN_BOXES.keys():
+            if property in value:
+                self._spin_boxes[property].setValue(value[property])
+        for property in __class__.CHECK_BOXES.keys():
+            if property in value:
+                if value[property] == True:
+                    self._check_boxes[property].setCheckState(Qt.Checked)
+                else:
+                    self._check_boxes[property].setCheckState(Qt.Unchecked)
         if (mapping := value.get("mapping")) is not None:
             existing = self._mapping_text_edit.toPlainText()
             if mapping != existing:
                 self._mapping_text_edit.setPlainText(mapping)
-
-    def timeout_changed(self, value):
-        if value == self._value.get("timeout"):
-            return
-        self._value["timeout"] = value
-        self.valueChanged.emit(self._value)
-
-    def stick_dead_zone_changed(self, value):
-        if value == self._value.get("stick_dead_zone"):
-            return
-        self._value["stick_dead_zone"] = value
-        self.valueChanged.emit(self._value)
-
-    def trigger_dead_zone_changed(self, value):
-        if value == self._value.get("trigger_dead_zone"):
-            return
-        self._value["trigger_dead_zone"] = value
-        self.valueChanged.emit(self._value)
-
-    def stroke_end_threshold_changed(self, value):
-        if value == self._value.get("stroke_end_threshold"):
-            return
-        self._value["stroke_end_threshold"] = value
-        self.valueChanged.emit(self._value)
 
     def mapping_changed(self):
         text = self._mapping_text_edit.toPlainText()
