@@ -14,16 +14,18 @@
 # You should have received a copy of the GNU General Public License along
 # with this program; if not, write to the Free Software Foundation, Inc.,
 # 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
-
+import sdl2
+import threading
 import ctypes
 import re
 from copy import copy
 from dataclasses import dataclass
 from math import atan2, floor, hypot, sqrt, tau
+from typing import Callable, List, Set, Tuple
 from PyQt5.QtCore import QVariant, pyqtSignal, Qt
 from PyQt5.QtGui import QFont
 from plover.resource import resource_exists, resource_filename
-from plover.machine.base import ThreadedStenotypeBase
+from plover.machine.base import StenotypeBase
 from PyQt5.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
@@ -71,14 +73,34 @@ from sdl2 import (
     SDL_NumJoysticks,
     SDL_Quit,
     SDL_SetHint,
+    SDL_WaitEvent,
     SDL_WaitEventTimeout,
     SDL_WasInit,
+    SDL_JOYAXISMOTION,
+    SDL_JOYBALLMOTION,
+    SDL_JOYHATMOTION,
+    SDL_JOYBUTTONDOWN,
+    SDL_JOYBUTTONUP,
+    SDL_JOYDEVICEADDED,
+    SDL_JOYDEVICEREMOVED,
+    SDL_JoyAxisEvent,
+    SDL_JoyBallEvent,
+    SDL_JoyHatEvent,
+    SDL_JoyButtonEvent,
+    SDL_JoyDeviceEvent,
 )
 
+mapping_path = "asset:plover_controller:assets/default_mapping.txt"
+if not resource_exists(mapping_path):
+    raise Exception("couldn't find default mapping file")
 
-def get_keys_for_stroke(stroke_str):
+with open(resource_filename(mapping_path), "r") as f:
+    DEFAULT_MAPPING = f.read()
+
+
+def get_keys_for_stroke(stroke_str: str) -> Tuple[str]:
+    keys: List[str] = []
     passed_hyphen = False
-    keys = []
     no_hyphen_keys = {"*", "#"}
     for key in stroke_str:
         if key == "-":
@@ -93,47 +115,77 @@ def get_keys_for_stroke(stroke_str):
     return tuple(keys)
 
 
+@dataclass
+class Stick:
+    name: str
+    x_axis: str
+    y_axis: str
+    offset: float
+    segments: List[str]
+
+
+@dataclass
+class Trigger:
+    name: str
+    axis: str
+
+
+@dataclass
+class Button:
+    name: str
+    button: str
+
+
 def parse_mappings(text):
-    stick_segment_counts = {}
-    stick_offsets = {}
-    stick_directions = {}
+    sticks = {}
+    buttons = {}
+    triggers = {}
     ordered_mappings = {}
     unordered_mappings = []
     for line in text.splitlines():
         if not line or line.startswith("//"):
             continue
         if match := re.match(
-            r"(\w+) stick has (\d) segments offset by ([0-9-.]+) degrees \(([a-z,]+)\)",
+            r"(\w+) stick has segments \(([a-z,]+)\) on axes (\d+) and (\d+) offset by ([0-9-.]+) degrees",
             line,
         ):
-            stick_segment_counts[match[1]] = int(match[2])
-            stick_offsets[match[1]] = float(match[3])
-            stick_directions[match[1]] = match[4].split(",")
-        elif match := re.match(r"([a-z0-9,]+) -> ([A-Z-*#]+)", line):
-            unordered_mappings.append(
-                (match[1].split(","), get_keys_for_stroke(match[2]))
+            stick = Stick(
+                name=match[1],
+                x_axis=f"a{match[3]}",
+                y_axis=f"a{match[4]}",
+                offset=float(match[5]),
+                segments=match[2].split(","),
             )
-        elif match := re.match(r"(left|right)\(([a-z,]+)\) -> ([A-Z-*#]+)", line):
+            sticks[stick.name] = stick
+        elif match := re.match(r"([a-z0-9,]+) -> ([A-Z-*#]+)", line):
+            lhs = match[1].split(",")
+            rhs = get_keys_for_stroke(match[2])
+            unordered_mappings.append((lhs, rhs))
+        elif match := re.match(r"(\w+)\(([a-z,]+)\) -> ([A-Z-*#]+)", line):
             ordered_mappings[
                 tuple(f"{match[1]}{pos}" for pos in match[2].split(","))
             ] = get_keys_for_stroke(match[3])
+        elif match := re.match(r"button (\d+) is ([a-z0-9]+)", line):
+            button = Button(
+                name=match[2],
+                button=f"b{match[1]}",
+            )
+            buttons[button.button] = button
+        elif match := re.match(r"trigger on axis (\d+) is ([a-z0-9]+)", line):
+            trigger = Trigger(
+                name=match[2],
+                axis=f"a{match[1]}",
+            )
+            triggers[trigger.axis] = trigger
         else:
             print(f"don't know how to parse '{line}', skipping")
     return (
-        stick_segment_counts,
-        stick_offsets,
-        stick_directions,
+        sticks,
+        buttons,
+        triggers,
         unordered_mappings,
         ordered_mappings,
     )
-
-
-mapping_path = "asset:plover_controller:assets/default_mapping.txt"
-if not resource_exists(mapping_path):
-    raise Exception("couldn't find default mapping file")
-
-with open(resource_filename(mapping_path), "r") as f:
-    DEFAULT_MAPPING = f.read()
 
 
 def sdl_init(reinitialize=False):
@@ -165,7 +217,57 @@ def buttons_to_keys(in_keys, unordered_mappings):
     return keys
 
 
-class ControllerMachine(ThreadedStenotypeBase):
+controller_thread_instance = None
+
+
+def get_controller_thread():
+    global controller_thread_instance
+    if controller_thread_instance is not None:
+        return controller_thread_instance
+    controller_thread_instance = ControllerThread()
+    controller_thread_instance.start()
+    return controller_thread_instance
+
+
+class ControllerThread(threading.Thread):
+    lock = threading.Lock()
+    listeners: Set[Callable[[SDL_Event], None]] = set()
+
+    def __init__(self):
+        super().__init__()
+
+    def run(self):
+        SDL_Quit()
+        SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, b"1")
+        SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, b"1")
+        SDL_Init(SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER)
+
+        for i in range(SDL_NumJoysticks()):
+            js = SDL_JoystickOpen(i)
+
+        event = SDL_Event()
+        while True:
+            if not SDL_WaitEvent(event):
+
+                error = SDL_GetError()
+                if error:
+                    raise Exception(f"SDL error occurred: {error.decode('utf-8')}")
+                else:
+                    raise Exception("Unknown SDL error occurred")
+            with self.lock:
+                for listener in self.listeners:
+                    listener(event)
+
+    def add_listener(self, listener: Callable[[SDL_Event], None]):
+        with self.lock:
+            self.listeners.add(listener)
+
+    def remove_listener(self, listener: Callable[[SDL_Event], None]):
+        with self.lock:
+            self.listeners.remove(listener)
+
+
+class ControllerMachine(StenotypeBase):
     KEYMAP_MACHINE_TYPE = "TX Bolt"
     KEYS_LAYOUT = """
         #  #  #  #  #  #  #  #  #  #
@@ -185,62 +287,75 @@ class ControllerMachine(ThreadedStenotypeBase):
     _pending_stick_movements = {}
     _unordered_mappings = []
     _ordered_mappings = {}
-    _stick_segment_counts = {}
-    _stick_offsets = {}
-    _stick_directions = {}
+    _sticks = {}
+    _buttons = {}
+    _triggers = {}
 
     def __init__(self, params):
         super().__init__()
         self._params = params
         (
-            self._stick_segment_counts,
-            self._stick_offsets,
-            self._stick_directions,
+            self._sticks,
+            self._buttons,
+            self._triggers,
             self._unordered_mappings,
             self._ordered_mappings,
         ) = parse_mappings(self._params["mapping"])
 
-    def run(self):
-        event = SDL_Event()
-        timeout = int(self._params["timeout"] * 1000)
-        while not self.finished.is_set():
-            if SDL_WaitEventTimeout(event, timeout) != 0:
-                self.handle_sdl_event(event)
-            elif error := SDL_GetError():
-                errstr = SDL_GetError().decode("utf-8")
-                if errstr == "That operation is not supported":
-                    self._stopped()
-                    return
-                self._error()
-                raise Exception(errstr)
+    def start_capture(self):
+        self._initializing()
+        get_controller_thread().add_listener(self._handle_sdl_event)
+        self._ready()
+
+    def stop_capture(self):
+        get_controller_thread().remove_listener(self._handle_sdl_event)
         self._stopped()
 
-    def handle_sdl_event(self, event):
-        self._ready()
-        if event.type == SDL_CONTROLLERAXISMOTION:
-            self.handle_axis_motion(event.caxis)
-        elif event.type in [SDL_CONTROLLERBUTTONUP, SDL_CONTROLLERBUTTONDOWN]:
-            self.handle_button(event.cbutton)
-        elif event.type == SDL_CONTROLLERDEVICEREMOVED:
-            self.handle_device_removed(event)
+    @classmethod
+    def get_option_info(cls):
+        return {
+            "mapping": (DEFAULT_MAPPING, str),
+            "timeout": (1.0, float),
+            "stick_dead_zone": (0.6, float),
+            "trigger_dead_zone": (0.9, float),
+            "stroke_end_threshold": (0.4, float),
+        }
 
-    def handle_axis_motion(self, event):
-        if event.which != self._controller_instance_id:
-            return
-        axis = SDL_GameControllerGetStringForAxis(event.axis).decode("utf-8")
+    def _handle_sdl_event(self, event: SDL_Event):
+        if event.type == SDL_JOYAXISMOTION:
+            self._handle_axis(event.jaxis)
+        elif event.type == SDL_JOYBALLMOTION:
+            self._handle_ball(event.jball)
+        elif event.type == SDL_JOYHATMOTION:
+            self._handle_hat(event.jhat)
+        elif event.type in [SDL_JOYBUTTONDOWN, SDL_JOYBUTTONUP]:
+            self._handle_button(event.jbutton)
+        elif event.type in [SDL_JOYDEVICEADDED, SDL_JOYDEVICEREMOVED]:
+            self._handle_device(event.jdevice)
+
+    def _handle_axis(self, event: SDL_JoyAxisEvent):
+        axis = f"a{event.axis}"
         value = float(event.value) / 32768
-        if axis in ["lefttrigger", "righttrigger"]:
+        if axis in self._triggers:
             self._trigger_states[axis] = value
-        else:
+        elif axis in sum(
+            map(lambda x: [x.x_axis, x.y_axis], self._sticks.values()), []
+        ):
             self._stick_states[axis] = value
         self.check_axes()
         self.maybe_complete_ordered_chord()
         self.maybe_complete_stroke()
 
-    def handle_button(self, event):
-        if event.which != self._controller_instance_id:
-            return
-        button = SDL_GameControllerGetStringForButton(event.button).decode("utf-8")
+    def _handle_ball(self, event: SDL_JoyBallEvent):
+        pass
+
+    def _handle_hat(self, event: SDL_JoyHatEvent):
+        pass
+
+    def _handle_button(self, event: SDL_JoyButtonEvent):
+        button = f"b{event.button}"
+        if button_entry := self._buttons.get(button):
+            button = button_entry.name
         if event.state:
             self._pressed_buttons.add(button)
             if button not in self._unsequenced_buttons:
@@ -249,28 +364,29 @@ class ControllerMachine(ThreadedStenotypeBase):
             self._pressed_buttons.discard(button)
             self.maybe_complete_stroke()
 
-    def handle_device_removed(self, event):
-        if event.cdevice.which != self._controller_instance_id:
-            return
-        self.finished.set()
+    def _handle_device(self, event: SDL_JoyDeviceEvent):
+        if event.type == SDL_JOYDEVICEADDED:
+            SDL_JoystickOpen(event.which)
 
     def maybe_complete_ordered_chord(self):
-        for stick in ["left", "right"]:
+        for stick in self._sticks.values():
             if any(
-                k.startswith(stick) and abs(v) > self._params["stroke_end_threshold"]
-                for k, v in self._stick_states.items()
+                map(
+                    lambda v: abs(v) > self._params["stroke_end_threshold"],
+                    (self._stick_states.get(axis, 0.0) for axis in [stick.x_axis, stick.y_axis]),
+                )
             ):
                 continue
-            pending_stick_movements = self._pending_stick_movements.get(stick, [])
+            pending_stick_movements = self._pending_stick_movements.get(stick.name, [])
             if (
                 result := self._ordered_mappings.get(tuple(pending_stick_movements))
             ) is not None:
-                self._pending_stick_movements[stick] = []
+                self._pending_stick_movements[stick.name] = []
                 self._pending_keys.update(result)
             else:
                 for key in pending_stick_movements:
                     self._unsequenced_buttons.add(key)
-                self._pending_stick_movements[stick] = []
+                self._pending_stick_movements[stick.name] = []
 
     def maybe_complete_stroke(self):
         if not self._unsequenced_buttons and not self._pending_keys:
@@ -299,128 +415,48 @@ class ControllerMachine(ThreadedStenotypeBase):
         self._notify(actions)
 
     def check_axes(self):
-        for axis in ["left", "right"]:
-            lr = self._stick_states.get(f"{axis}x", 0)
-            ud = self._stick_states.get(f"{axis}y", 0)
-            self.check_stick(axis, lr, ud)
-        for axis in ["lefttrigger", "righttrigger"]:
-            val = self._trigger_states.get(axis, 0)
+        for stick in self._sticks.values():
+            lr = self._stick_states.get(stick.x_axis, 0.0)
+            ud = self._stick_states.get(stick.y_axis, 0.0)
+            self.check_stick(stick, lr, ud)
+        for trigger in self._triggers.values():
+            val = self._trigger_states.get(trigger.axis, 0)
             if val > 0:
-                self._unsequenced_buttons.add(axis)
+                self._unsequenced_buttons.add(trigger.name)
 
-    def check_stick(self, stick, lr, ud):
+    def check_stick(self, stick: Stick, lr, ud):
         if hypot(lr, ud) < self._params["stick_dead_zone"] * sqrt(2):
             return
-        segment_count = self._stick_segment_counts[stick]
-        offset = self._stick_offsets[stick] / 360 * tau
-        segment_size = tau / segment_count
+        offset = stick.offset / 360 * tau
+        segment_size = tau / len(stick.segments)
         angle = atan2(ud, lr) - offset
         while angle < 0:
             angle += tau
         while angle > tau:
             angle -= tau
-        segment = floor(angle / tau * segment_count)
-        direction = self._stick_directions[stick][segment % segment_count]
-        segment_name = f"{stick}{direction}"
-        if stick not in self._pending_stick_movements:
-            self._pending_stick_movements[stick] = []
-        inorder_list = self._pending_stick_movements[stick]
+        segment = floor(angle / tau * len(stick.segments))
+        direction = stick.segments[segment % len(stick.segments)]
+        segment_name = f"{stick.name}{direction}"
+        if stick.name not in self._pending_stick_movements:
+            self._pending_stick_movements[stick.name] = []
+        inorder_list = self._pending_stick_movements[stick.name]
         if len(inorder_list) == 0 or segment_name != inorder_list[-1]:
             inorder_list.append(segment_name)
 
-    def start_capture(self):
-        sdl_init()
-        for i in range(SDL_NumJoysticks()):
-            if not SDL_IsGameController(i):
-                continue
-            gc = SDL_GameControllerOpen(i)
-            js = SDL_GameControllerGetJoystick(gc)
-            self._controller = gc
-            self._joystick = js
-            self._controller_instance_id = SDL_JoystickInstanceID(js)
-            break
-        if self._controller is not None:
-            super().start_capture()
-        else:
-            self._error()
-
-    def stop_capture(self):
-        if self._controller:
-            SDL_GameControllerClose(self._controller)
-            self._controller = None
-            self._joystick = None
-            self._controller_instance_id = None
-        SDL_Quit()
-        super().stop_capture()
-
-    @classmethod
-    def get_option_info(cls):
-        return {
-            "mapping": (DEFAULT_MAPPING, str),
-            "timeout": (1.0, float),
-            "stick_dead_zone": (0.6, float),
-            "trigger_dead_zone": (0.9, float),
-            "stroke_end_threshold": (0.4, float),
-        }
-
-
-@dataclass
-class JoystickInfo:
-    name: str
-    guid: str
-    n_axes: int
-    n_balls: int
-    n_hats: int
-    n_buttons: int
-
-
-def enumerate_joysticks():
-    joysticks = {}
-    for i in range(SDL_NumJoysticks()):
-        if not SDL_IsGameController(i):
-            continue
-        js = SDL_JoystickOpen(i)
-        guid = SDL_JoystickGetGUID(js)
-        guid_buf = ctypes.create_string_buffer(33)
-        SDL_JoystickGetGUIDString(guid, guid_buf, 33)
-        guid_str = guid_buf.value.decode("utf-8")
-        info = JoystickInfo(
-            name=SDL_JoystickName(js).decode("utf-8"),
-            guid=guid_buf.value.decode("utf-8"),
-            n_axes=SDL_JoystickNumAxes(js),
-            n_balls=SDL_JoystickNumBalls(js),
-            n_hats=SDL_JoystickNumHats(js),
-            n_buttons=SDL_JoystickNumButtons(js),
-        )
-        joysticks[info.guid] = info
-        SDL_JoystickClose(js)
-    return joysticks
-
 
 class ControllerOption(QGroupBox):
+    message = pyqtSignal(str)
     valueChanged = pyqtSignal(QVariant)
     _value = {}
     _joystick = None
     _joysticks = {}
+    _last_message = None
 
     def __init__(self):
         super().__init__()
         self.valueChanged.connect(self.setValue)
 
         self._form_layout = QFormLayout(self)
-
-        self._device_label = QLabel("Device:", self)
-        self._device_selector = QComboBox(self)
-        self._device_selector.setEnabled(False)
-        self._device_selector.setSizePolicy(
-            QSizePolicy.Expanding, QSizePolicy.Preferred
-        )
-        self._device_refresh_button = QPushButton("Refresh", self)
-        self._device_refresh_button.clicked.connect(self.refresh_devices)
-        self._device_layout = QHBoxLayout()
-        self._device_layout.addWidget(self._device_selector)
-        self._device_layout.addWidget(self._device_refresh_button)
-        self._form_layout.addRow(self._device_label, self._device_layout)
 
         self._timeout_label = QLabel("Timeout:", self)
         self._timeout_double_spin_box = QDoubleSpinBox(self)
@@ -469,7 +505,42 @@ class ControllerOption(QGroupBox):
         self._mapping_layout.addWidget(self._mapping_reset_button)
         self._form_layout.addRow(self._mapping_label, self._mapping_layout)
 
-        self.populate_devices()
+        self._feedback_label = QLabel("Last event:", self)
+        self._feedback_output_label = QLabel(self)
+        self._feedback_output_label.setFont(QFont("Monospace"))
+        self._form_layout.addRow(self._feedback_label, self._feedback_output_label)
+
+        self.message.connect(self._feedback_output_label.setText)
+        get_controller_thread().add_listener(self._handle_sdl_event)
+
+    def __del__(self):
+        get_controller_thread().remove_listener(self._handle_sdl_event)
+
+    def _handle_sdl_event(self, event: SDL_Event):
+        if event.type == SDL_JOYAXISMOTION:
+            message = f"Axis {event.jaxis.axis} motion (device: {event.jaxis.which})"
+        elif event.type == SDL_JOYBALLMOTION:
+            message = f"Ball {event.jball.ball} motion (device: {event.jball.which})"
+        elif event.type == SDL_JOYHATMOTION:
+            message = f"Hat {event.jhat.hat} motion (device: {event.jhat.which})"
+        elif event.type == SDL_JOYBUTTONDOWN:
+            message = (
+                f"Button {event.jbutton.button} pressed (device: {event.jbutton.which})"
+            )
+        elif event.type == SDL_JOYBUTTONUP:
+            message = f"Button {event.jbutton.button} released (device: {event.jbutton.which})"
+        elif event.type == SDL_JOYDEVICEADDED:
+            message = f"Device {event.jdevice.which} added"
+        elif event.type == SDL_JOYDEVICEREMOVED:
+            message = f"Device {event.jdevice.which} removed"
+        else:
+            return
+        if message != self._last_message:
+            try:
+                self.message.emit(message)
+            except RuntimeError:
+                pass
+        self._last_message = message
 
     def setValue(self, value):
         self._value = copy(value)
@@ -485,19 +556,6 @@ class ControllerOption(QGroupBox):
             existing = self._mapping_text_edit.toPlainText()
             if mapping != existing:
                 self._mapping_text_edit.setPlainText(mapping)
-
-    def populate_devices(self):
-        sdl_init(reinitialize=False)
-        self._joysticks = enumerate_joysticks()
-        for joystick in self._joysticks.values():
-            self._device_selector.addItem(joystick.name, joystick.guid)
-
-    def refresh_devices(self):
-        sdl_init(reinitialize=True)
-        self._device_selector.clear()
-        self._joysticks = enumerate_joysticks()
-        for joystick in self._joysticks.values():
-            self._device_selector.addItem(joystick.name, joystick.guid)
 
     def timeout_changed(self, value):
         if value == self._value.get("timeout"):
