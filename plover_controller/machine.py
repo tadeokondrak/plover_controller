@@ -223,7 +223,7 @@ class ControllerThread(threading.Thread):
             SDL_Quit()
             SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, b"1")
             SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, b"1")
-            SDL_Init(SDL_INIT_JOYSTICK)
+            SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK)
             self.set_hint_event_type = SDL_RegisterEvents(1)
 
             for i in range(SDL_NumJoysticks()):
