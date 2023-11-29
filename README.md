@@ -105,7 +105,7 @@ Any problems will most likely be due to your button map. The best way to resolve
  +---------|     *     |---------+ 
  \          \         /          / 
   \          \       /          / 
-   \   -R     \_____/     G-   /  
+   \   -R     \_____/     -G   /  
     \        /       \        /   
      \      /   -B    \      /    
       \    /           \    /     
