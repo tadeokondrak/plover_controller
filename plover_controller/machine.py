@@ -18,28 +18,26 @@ import sdl2
 import threading
 import ctypes
 import re
-import plover
+from plover.engine import StenoEngine
+from plover.gui_qt.tool import Tool
+from plover.misc import boolean
 from copy import copy
 from dataclasses import dataclass
 from math import atan2, floor, hypot, sqrt, tau
-from typing import Callable, List, Set, Tuple
+from typing import Any, Callable
 from PyQt5.QtCore import QVariant, pyqtSignal, Qt
 from PyQt5.QtGui import QFont
 from plover.resource import resource_exists, resource_filename
 from plover.machine.base import StenotypeBase
 from PyQt5.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
-    QHBoxLayout,
     QLabel,
     QPushButton,
-    QSizePolicy,
     QTextEdit,
     QVBoxLayout,
-    QWidget,
 )
 from sdl2 import (
     SDL_Event,
@@ -53,7 +51,6 @@ from sdl2 import (
     SDL_Init,
     SDL_INIT_JOYSTICK,
     SDL_INIT_VIDEO,
-    SDL_IsGameController,
     SDL_JoyAxisEvent,
     SDL_JOYAXISMOTION,
     SDL_JoyBallEvent,
@@ -66,15 +63,6 @@ from sdl2 import (
     SDL_JOYDEVICEREMOVED,
     SDL_JoyHatEvent,
     SDL_JOYHATMOTION,
-    SDL_JoystickClose,
-    SDL_JoystickGetGUID,
-    SDL_JoystickGetGUIDString,
-    SDL_JoystickInstanceID,
-    SDL_JoystickName,
-    SDL_JoystickNumAxes,
-    SDL_JoystickNumBalls,
-    SDL_JoystickNumButtons,
-    SDL_JoystickNumHats,
     SDL_JoystickOpen,
     SDL_NumJoysticks,
     SDL_PushEvent,
@@ -82,10 +70,7 @@ from sdl2 import (
     SDL_RegisterEvents,
     SDL_SetHint,
     SDL_WaitEvent,
-    SDL_WaitEventTimeout,
-    SDL_WasInit,
     SDL_free,
-    SDL_memset,
 )
 
 SDL_strdup_void = sdl2.dll._bind("SDL_strdup", [ctypes.c_char_p], ctypes.c_void_p)
@@ -98,8 +83,8 @@ with open(resource_filename(mapping_path), "r") as f:
     DEFAULT_MAPPING = f.read()
 
 
-def get_keys_for_stroke(stroke_str: str) -> Tuple[str]:
-    keys: List[str] = []
+def get_keys_for_stroke(stroke_str: str) -> tuple[str, ...]:
+    keys: list[str] = []
     passed_hyphen = False
     no_hyphen_keys = {"*", "#"}
     for key in stroke_str:
@@ -121,7 +106,7 @@ class Stick:
     x_axis: str
     y_axis: str
     offset: float
-    segments: List[str]
+    segments: list[str]
 
 
 @dataclass
@@ -213,7 +198,7 @@ def get_controller_thread():
 class ControllerThread(threading.Thread):
     lock = threading.Lock()
     set_hint_event_type = None
-    listeners: Set[Callable[[SDL_Event], None]] = set()
+    listeners: set[Callable[[SDL_Event], None]] = set()
 
     def __init__(self):
         super().__init__()
@@ -257,7 +242,7 @@ class ControllerThread(threading.Thread):
         with self.lock:
             self.listeners.remove(listener)
 
-    def set_hint(self, name, value):
+    def set_hint(self, name: bytes, value: bytes):
         with self.lock:
             event = SDL_Event()
             event.type = self.set_hint_event_type
@@ -290,7 +275,7 @@ class ControllerMachine(StenotypeBase):
     _buttons = {}
     _triggers = {}
 
-    def __init__(self, params):
+    def __init__(self, params: dict[str, Any]):
         super().__init__()
         self._params = params
         (
@@ -322,17 +307,17 @@ class ControllerMachine(StenotypeBase):
         self._stopped()
 
     @classmethod
-    def get_option_info(cls):
+    def get_option_info(cls) -> dict[str, tuple[Any, Callable[[str], Any]]]:
         return {
             "mapping": (DEFAULT_MAPPING, str),
             "timeout": (1.0, float),
             "stick_dead_zone": (0.6, float),
             "trigger_dead_zone": (0.9, float),
             "stroke_end_threshold": (0.4, float),
-            "use_hidapi": (True, plover.misc.boolean),
-            "use_rawinput": (False, plover.misc.boolean),
-            "correlate_rawinput": (False, plover.misc.boolean),
-            "use_joystick_thread": (False, plover.misc.boolean),
+            "use_hidapi": (True, boolean),
+            "use_rawinput": (False, boolean),
+            "correlate_rawinput": (False, boolean),
+            "use_joystick_thread": (False, boolean),
         }
 
     def _handle_sdl_event(self, event: SDL_Event):
@@ -537,7 +522,9 @@ class ControllerOption(QGroupBox):
         self._axis_feedback_label = QLabel("Last axis event:", self)
         self._axis_feedback_output_label = QLabel(self)
         self._axis_feedback_output_label.setFont(QFont("Monospace"))
-        self._form_layout.addRow(self._axis_feedback_label, self._axis_feedback_output_label)
+        self._form_layout.addRow(
+            self._axis_feedback_label, self._axis_feedback_output_label
+        )
         self.axis_message.connect(self._axis_feedback_output_label.setText)
 
         self._feedback_label = QLabel("Last other event:", self)
@@ -612,3 +599,74 @@ class ControllerOption(QGroupBox):
 
     def reset_mapping(self):
         self._mapping_text_edit.setPlainText(DEFAULT_MAPPING)
+
+
+class ControllerDisplayTool(Tool):
+    TITLE = "Controller Display"
+    ICON = ""
+    ROLE = "controller_display_tool"
+
+    axis_message = pyqtSignal(str)
+    other_message = pyqtSignal(str)
+    _last_axis_message = None
+    _last_other_message = None
+
+    def __init__(self, engine: StenoEngine):
+        super().__init__(engine)
+
+        self._form_layout = QFormLayout(self)
+
+        self._axis_feedback_label = QLabel("Last axis event:", self)
+        self._axis_feedback_output_label = QLabel(self)
+        self._axis_feedback_output_label.setFont(QFont("Monospace"))
+        self._form_layout.addRow(
+            self._axis_feedback_label, self._axis_feedback_output_label
+        )
+        self.axis_message.connect(self._axis_feedback_output_label.setText)
+
+        self._feedback_label = QLabel("Last other event:", self)
+        self._feedback_output_label = QLabel(self)
+        self._feedback_output_label.setFont(QFont("Monospace"))
+        self._form_layout.addRow(self._feedback_label, self._feedback_output_label)
+        self.other_message.connect(self._feedback_output_label.setText)
+
+        get_controller_thread().add_listener(self._handle_sdl_event)
+
+    def __del__(self):
+        get_controller_thread().remove_listener(self._handle_sdl_event)
+
+    def _handle_sdl_event(self, event: SDL_Event):
+        if event.type == SDL_JOYAXISMOTION:
+            if event.jaxis.value / 32768 < 0.25:
+                return
+            message = f"Axis {event.jaxis.axis} motion (device: {event.jaxis.which})"
+            if message != self._last_axis_message:
+                try:
+                    self.axis_message.emit(message)
+                except RuntimeError:
+                    pass
+            self._last_axis_message = message
+            return
+
+        if event.type == SDL_JOYBALLMOTION:
+            message = f"Ball {event.jball.ball} motion (device: {event.jball.which})"
+        elif event.type == SDL_JOYHATMOTION:
+            message = f"Hat {event.jhat.hat} motion (device: {event.jhat.which})"
+        elif event.type == SDL_JOYBUTTONDOWN:
+            message = (
+                f"Button {event.jbutton.button} pressed (device: {event.jbutton.which})"
+            )
+        elif event.type == SDL_JOYBUTTONUP:
+            message = f"Button {event.jbutton.button} released (device: {event.jbutton.which})"
+        elif event.type == SDL_JOYDEVICEADDED:
+            message = f"Device {event.jdevice.which} added"
+        elif event.type == SDL_JOYDEVICEREMOVED:
+            message = f"Device {event.jdevice.which} removed"
+        else:
+            return
+        if message != self._last_other_message:
+            try:
+                self.other_message.emit(message)
+            except RuntimeError:
+                pass
+        self._last_other_message = message
