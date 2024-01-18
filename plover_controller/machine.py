@@ -24,7 +24,7 @@ from plover.misc import boolean
 from copy import copy
 from dataclasses import dataclass
 from math import atan2, floor, hypot, sqrt, tau
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 from PyQt5.QtCore import QVariant, pyqtSignal, Qt
 from PyQt5.QtGui import QFont
 from plover.resource import resource_exists, resource_filename
@@ -427,23 +427,21 @@ class ControllerMachine(StenotypeBase):
                 self._unsequenced_buttons.add(trigger.name)
 
     def check_stick(self, stick: Stick, lr, ud):
-        if hypot(lr, ud) < self._params["stick_dead_zone"] * sqrt(2):
-            return
-        offset = stick.offset / 360 * tau
-        segment_size = tau / len(stick.segments)
-        angle = atan2(ud, lr) - offset
-        while angle < 0:
-            angle += tau
-        while angle > tau:
-            angle -= tau
-        segment = floor(angle / tau * len(stick.segments))
-        direction = stick.segments[segment % len(stick.segments)]
-        segment_name = f"{stick.name}{direction}"
-        if stick.name not in self._pending_stick_movements:
-            self._pending_stick_movements[stick.name] = []
-        inorder_list = self._pending_stick_movements[stick.name]
-        if len(inorder_list) == 0 or segment_name != inorder_list[-1]:
-            inorder_list.append(segment_name)
+        segment_index = stick_segment(
+            stick_dead_zone=self._params["stick_dead_zone"],
+            offset=stick.offset,
+            segment_count=len(stick.segments),
+            lr=lr,
+            ud=ud,
+        )
+        if segment_index is not None:
+            direction = stick.segments[segment_index]
+            segment_name = f"{stick.name}{direction}"
+            if stick.name not in self._pending_stick_movements:
+                self._pending_stick_movements[stick.name] = []
+            inorder_list = self._pending_stick_movements[stick.name]
+            if len(inorder_list) == 0 or segment_name != inorder_list[-1]:
+                inorder_list.append(segment_name)
 
 
 class ControllerOption(QGroupBox):
@@ -670,3 +668,23 @@ class ControllerDisplayTool(Tool):
             except RuntimeError:
                 pass
         self._last_other_message = message
+
+
+def stick_segment(
+    stick_dead_zone: float,
+    offset: float,
+    segment_count: int,
+    lr: float,
+    ud: float,
+) -> Optional[int]:
+    if hypot(lr, ud) < stick_dead_zone * sqrt(2):
+        return None
+    offset = offset / 360 * tau
+    segment_size = tau / segment_count
+    angle = atan2(ud, lr) - offset
+    while angle < 0:
+        angle += tau
+    while angle > tau:
+        angle -= tau
+    segment = floor(angle / tau * segment_count)
+    return segment % segment_count
