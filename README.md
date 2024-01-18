@@ -139,3 +139,8 @@ Any problems will most likely be due to your button map. The best way to resolve
 | A Button                 | -S       |
 | Y Button                 | -D       |
 | B Button                 | -Z       |
+
+## Default mapping image
+
+![Default mapping](https://github.com/tadeokondrak/plover_controller/assets/4098453/f2883413-c177-4c0c-80aa-778b11a5173b)
+
