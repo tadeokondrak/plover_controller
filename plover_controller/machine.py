@@ -19,6 +19,7 @@ import threading
 import ctypes
 import re
 import plover
+import plover.misc
 from copy import copy
 from dataclasses import dataclass
 from math import atan2, floor, hypot, sqrt, tau
@@ -29,17 +30,13 @@ from plover.resource import resource_exists, resource_filename
 from plover.machine.base import StenotypeBase
 from PyQt5.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
-    QHBoxLayout,
     QLabel,
     QPushButton,
-    QSizePolicy,
     QTextEdit,
     QVBoxLayout,
-    QWidget,
 )
 from sdl2 import (
     SDL_Event,
@@ -53,7 +50,6 @@ from sdl2 import (
     SDL_Init,
     SDL_INIT_JOYSTICK,
     SDL_INIT_VIDEO,
-    SDL_IsGameController,
     SDL_JoyAxisEvent,
     SDL_JOYAXISMOTION,
     SDL_JoyBallEvent,
@@ -66,15 +62,6 @@ from sdl2 import (
     SDL_JOYDEVICEREMOVED,
     SDL_JoyHatEvent,
     SDL_JOYHATMOTION,
-    SDL_JoystickClose,
-    SDL_JoystickGetGUID,
-    SDL_JoystickGetGUIDString,
-    SDL_JoystickInstanceID,
-    SDL_JoystickName,
-    SDL_JoystickNumAxes,
-    SDL_JoystickNumBalls,
-    SDL_JoystickNumButtons,
-    SDL_JoystickNumHats,
     SDL_JoystickOpen,
     SDL_NumJoysticks,
     SDL_PushEvent,
@@ -82,10 +69,7 @@ from sdl2 import (
     SDL_RegisterEvents,
     SDL_SetHint,
     SDL_WaitEvent,
-    SDL_WaitEventTimeout,
-    SDL_WasInit,
     SDL_free,
-    SDL_memset,
 )
 
 SDL_strdup_void = sdl2.dll._bind("SDL_strdup", [ctypes.c_char_p], ctypes.c_void_p)
@@ -98,7 +82,7 @@ with open(resource_filename(mapping_path), "r") as f:
     DEFAULT_MAPPING = f.read()
 
 
-def get_keys_for_stroke(stroke_str: str) -> Tuple[str]:
+def get_keys_for_stroke(stroke_str: str) -> Tuple[str, ...]:
     keys: List[str] = []
     passed_hyphen = False
     no_hyphen_keys = {"*", "#"}
@@ -511,7 +495,7 @@ class ControllerOption(QGroupBox):
         for property, description in __class__.CHECK_BOXES.items():
 
             def state_changed(state, property=property):
-                value = state == Qt.Checked
+                value = state == Qt.CheckState.Checked
                 if value == self._value.get(property):
                     return
                 self._value[property] = value
@@ -537,7 +521,9 @@ class ControllerOption(QGroupBox):
         self._axis_feedback_label = QLabel("Last axis event:", self)
         self._axis_feedback_output_label = QLabel(self)
         self._axis_feedback_output_label.setFont(QFont("Monospace"))
-        self._form_layout.addRow(self._axis_feedback_label, self._axis_feedback_output_label)
+        self._form_layout.addRow(
+            self._axis_feedback_label, self._axis_feedback_output_label
+        )
         self.axis_message.connect(self._axis_feedback_output_label.setText)
 
         self._feedback_label = QLabel("Last other event:", self)
@@ -595,9 +581,9 @@ class ControllerOption(QGroupBox):
         for property in __class__.CHECK_BOXES.keys():
             if property in value:
                 if value[property] == True:
-                    self._check_boxes[property].setCheckState(Qt.Checked)
+                    self._check_boxes[property].setCheckState(Qt.CheckState.Checked)
                 else:
-                    self._check_boxes[property].setCheckState(Qt.Unchecked)
+                    self._check_boxes[property].setCheckState(Qt.CheckState.Unchecked)
         if (mapping := value.get("mapping")) is not None:
             existing = self._mapping_text_edit.toPlainText()
             if mapping != existing:
