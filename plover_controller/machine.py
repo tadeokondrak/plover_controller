@@ -20,10 +20,11 @@ import ctypes
 import re
 import plover
 import plover.misc
+from util import get_keys_for_stroke
 from copy import copy
 from dataclasses import dataclass
 from math import atan2, floor, hypot, sqrt, tau
-from typing import Callable, List, Set, Tuple
+from typing import Callable
 from PyQt5.QtCore import QVariant, pyqtSignal, Qt
 from PyQt5.QtGui import QFont
 from plover.resource import resource_exists, resource_filename
@@ -82,30 +83,13 @@ with open(resource_filename(mapping_path), "r") as f:
     DEFAULT_MAPPING = f.read()
 
 
-def get_keys_for_stroke(stroke_str: str) -> Tuple[str, ...]:
-    keys: List[str] = []
-    passed_hyphen = False
-    no_hyphen_keys = {"*", "#"}
-    for key in stroke_str:
-        if key == "-":
-            passed_hyphen = True
-            continue
-        if key in no_hyphen_keys:
-            keys.append(key)
-        elif passed_hyphen:
-            keys.append(f"-{key}")
-        else:
-            keys.append(f"{key}-")
-    return tuple(keys)
-
-
 @dataclass
 class Stick:
     name: str
     x_axis: str
     y_axis: str
     offset: float
-    segments: List[str]
+    segments: list[str]
 
 
 @dataclass
@@ -197,7 +181,7 @@ def get_controller_thread():
 class ControllerThread(threading.Thread):
     lock = threading.Lock()
     set_hint_event_type = None
-    listeners: Set[Callable[[SDL_Event], None]] = set()
+    listeners: set[Callable[[SDL_Event], None]] = set()
 
     def __init__(self):
         super().__init__()
