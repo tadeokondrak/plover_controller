@@ -37,7 +37,7 @@ Syntax:
 trigger on axis <axis-number> is <axis-name>
 ```
 
-## Button definition
+## Button/hat definition
 
 Example:
 
@@ -46,12 +46,15 @@ button 0 is a
 button 1 is b
 button 2 is x
 button 3 is y
+
+hat 0 is dpad
 ```
 
 Syntax:
 
 ```
 button <button-number> is <button-name>
+hat <hat-number> is <hat-name>
 ```
 
 ## Button/trigger mappings
@@ -74,7 +77,7 @@ Syntax:
 <name> -> <stroke>
 ```
 
-## Simple stick mappings
+## Simple stick/hat mappings
 
 Example:
 
@@ -86,6 +89,10 @@ leftdl -> K-
 rightdr -> -G
 rightd -> -B
 rightdl -> -R
+
+dpaddr -> -G
+dpadd -> -B
+dpaddl -> -R
 ```
 
 Syntax:
@@ -109,3 +116,5 @@ Syntax:
 ```
 <name>(<segments>) -> <stroke>
 ```
+
+Note: This is not implemented for hats. Please open an issue if you want this behavior.

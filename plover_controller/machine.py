@@ -43,16 +43,26 @@ from PyQt5.QtWidgets import (
 )
 from sdl2 import (
     SDL_Event,
+    SDL_free,
     SDL_GetError,
+    SDL_HAT_CENTERED,
+    SDL_HAT_DOWN,
+    SDL_HAT_LEFT,
+    SDL_HAT_LEFTDOWN,
+    SDL_HAT_LEFTUP,
+    SDL_HAT_RIGHT,
+    SDL_HAT_RIGHTDOWN,
+    SDL_HAT_RIGHTUP,
+    SDL_HAT_UP,
     SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS,
-    SDL_HINT_NO_SIGNAL_HANDLERS,
     SDL_HINT_JOYSTICK_HIDAPI,
-    SDL_HINT_JOYSTICK_RAWINPUT,
     SDL_HINT_JOYSTICK_RAWINPUT_CORRELATE_XINPUT,
+    SDL_HINT_JOYSTICK_RAWINPUT,
     SDL_HINT_JOYSTICK_THREAD,
-    SDL_Init,
+    SDL_HINT_NO_SIGNAL_HANDLERS,
     SDL_INIT_JOYSTICK,
     SDL_INIT_VIDEO,
+    SDL_Init,
     SDL_JoyAxisEvent,
     SDL_JOYAXISMOTION,
     SDL_JoyBallEvent,
@@ -72,10 +82,21 @@ from sdl2 import (
     SDL_RegisterEvents,
     SDL_SetHint,
     SDL_WaitEvent,
-    SDL_free,
 )
 
 SDL_strdup_void = sdl2.dll._bind("SDL_strdup", [ctypes.c_char_p], ctypes.c_void_p)
+
+HAT_VALUES = {
+    SDL_HAT_CENTERED: "c",
+    SDL_HAT_UP: "u",
+    SDL_HAT_RIGHT: "r",
+    SDL_HAT_DOWN: "d",
+    SDL_HAT_LEFT: "l",
+    SDL_HAT_RIGHTUP: "ur",
+    SDL_HAT_RIGHTDOWN: "dr",
+    SDL_HAT_LEFTUP: "ul",
+    SDL_HAT_LEFTDOWN: "dl",
+}
 
 mapping_path = "asset:plover_controller:assets/default_mapping.txt"
 if not resource_exists(mapping_path):
@@ -101,7 +122,7 @@ class Trigger:
 
 
 @dataclass
-class Button:
+class ButtonOrHat:
     name: str
     button: str
 
@@ -109,7 +130,7 @@ class Button:
 @dataclass
 class ParseMappingsResult:
     sticks: dict[str, Stick]
-    buttons: dict[str, Button]
+    buttons_and_hats: dict[str, ButtonOrHat]
     triggers: dict[str, Trigger]
     unordered_mappings: list[tuple[list[str], tuple[str, ...]]]
     ordered_mappings: dict[tuple[str, ...], tuple[str, ...]]
@@ -118,7 +139,7 @@ class ParseMappingsResult:
 def parse_mappings(text: str) -> ParseMappingsResult:
     result = ParseMappingsResult(
         sticks={},
-        buttons={},
+        buttons_and_hats={},
         triggers={},
         ordered_mappings={},
         unordered_mappings=[],
@@ -147,11 +168,17 @@ def parse_mappings(text: str) -> ParseMappingsResult:
                 tuple(f"{match[1]}{pos}" for pos in match[2].split(","))
             ] = get_keys_for_stroke(match[3])
         elif match := re.match(r"button (\d+) is ([a-z0-9]+)", line):
-            button = Button(
+            button = ButtonOrHat(
                 name=match[2],
                 button=f"b{match[1]}",
             )
-            result.buttons[button.button] = button
+            result.buttons_and_hats[button.button] = button
+        elif match := re.match(r"hat (\d+) is ([a-z0-9]+)", line):
+            button = ButtonOrHat(
+                name=match[2],
+                button=f"h{match[1]}",
+            )
+            result.buttons_and_hats[button.button] = button
         elif match := re.match(r"trigger on axis (\d+) is ([a-z0-9]+)", line):
             trigger = Trigger(
                 name=match[2],
@@ -256,14 +283,14 @@ class ControllerMachine(StenotypeBase):
     _params = {}
     _stick_states: dict[str, float] = {}
     _trigger_states: dict[str, float] = {}
-    _pressed_buttons: set[str] = set()
-    _unsequenced_buttons: set[str] = set()
+    _currently_pressed_buttons_and_hats: set[str] = set()
+    _unsequenced_buttons_and_hats: set[str] = set()
     _pending_keys: set[str] = set()
     _pending_stick_movements: dict[str, list[str]] = {}
     unordered_mappings: list[tuple[list[str], tuple[str, ...]]] = []
     ordered_mappings: dict[tuple[str, ...], tuple[str, ...]] = {}
     _sticks: dict[str, Stick] = {}
-    _buttons: dict[str, Button] = {}
+    _buttons_and_hats: dict[str, ButtonOrHat] = {}
     _triggers: dict[str, Trigger] = {}
 
     def __init__(self, params: dict[str, Any]):
@@ -271,7 +298,7 @@ class ControllerMachine(StenotypeBase):
         self._params = params
         mappings = parse_mappings(self._params["mapping"])
         self._sticks = mappings.sticks
-        self._buttons = mappings.buttons
+        self._buttons_and_hats = mappings.buttons_and_hats
         self._triggers = mappings.triggers
         self._unordered_mappings = mappings.unordered_mappings
         self._ordered_mappings = mappings.ordered_mappings
@@ -342,18 +369,28 @@ class ControllerMachine(StenotypeBase):
         pass
 
     def _handle_hat(self, event: SDL_JoyHatEvent):
-        pass
+        hat = f"h{event.hat}"
+        if button_entry := self._buttons_and_hats.get(hat):
+            hat = button_entry.name
+        if event.value == 0:
+            self._currently_pressed_buttons_and_hats.discard(hat)
+            self.maybe_complete_stroke()
+        else:
+            self._currently_pressed_buttons_and_hats.add(hat)
+            specific_hat = f"{hat}{HAT_VALUES[event.value]}"
+            if specific_hat not in self._unsequenced_buttons_and_hats:
+                self._unsequenced_buttons_and_hats.add(specific_hat)
 
     def _handle_button(self, event: SDL_JoyButtonEvent):
         button = f"b{event.button}"
-        if button_entry := self._buttons.get(button):
+        if button_entry := self._buttons_and_hats.get(button):
             button = button_entry.name
         if event.state:
-            self._pressed_buttons.add(button)
-            if button not in self._unsequenced_buttons:
-                self._unsequenced_buttons.add(button)
+            self._currently_pressed_buttons_and_hats.add(button)
+            if button not in self._unsequenced_buttons_and_hats:
+                self._unsequenced_buttons_and_hats.add(button)
         else:
-            self._pressed_buttons.discard(button)
+            self._currently_pressed_buttons_and_hats.discard(button)
             self.maybe_complete_stroke()
 
     def _handle_device(self, event: SDL_JoyDeviceEvent):
@@ -380,11 +417,11 @@ class ControllerMachine(StenotypeBase):
                 self._pending_keys.update(result)
             else:
                 for key in pending_stick_movements:
-                    self._unsequenced_buttons.add(key)
+                    self._unsequenced_buttons_and_hats.add(key)
                 self._pending_stick_movements[stick.name] = []
 
     def maybe_complete_stroke(self):
-        if not self._unsequenced_buttons and not self._pending_keys:
+        if not self._unsequenced_buttons_and_hats and not self._pending_keys:
             return
         if any(
             map(
@@ -395,14 +432,14 @@ class ControllerMachine(StenotypeBase):
             return
         if any(map(lambda v: v > 0, self._trigger_states.values())):
             return
-        if self._pressed_buttons:
+        if self._currently_pressed_buttons_and_hats:
             return
         keys = buttons_to_keys(
-            self._unsequenced_buttons,
+            self._unsequenced_buttons_and_hats,
             self._unordered_mappings,
         ).union(self._pending_keys)
         actions = self.keymap.keys_to_actions(list(keys))
-        self._unsequenced_buttons.clear()
+        self._unsequenced_buttons_and_hats.clear()
         self._pending_stick_movements.clear()
         self._pending_keys.clear()
         if not actions:
@@ -417,7 +454,7 @@ class ControllerMachine(StenotypeBase):
         for trigger in self._triggers.values():
             val = self._trigger_states.get(trigger.axis, 0)
             if val > 0:
-                self._unsequenced_buttons.add(trigger.name)
+                self._unsequenced_buttons_and_hats.add(trigger.name)
 
     def check_stick(self, stick: Stick, lr: float, ud: float):
         if hypot(lr, ud) < self._params["stick_dead_zone"] * sqrt(2):
@@ -546,7 +583,10 @@ class ControllerOption(QGroupBox):
         if event.type == SDL_JOYBALLMOTION:
             message = f"Ball {event.jball.ball} motion (device: {event.jball.which})"
         elif event.type == SDL_JOYHATMOTION:
-            message = f"Hat {event.jhat.hat} motion (device: {event.jhat.which})"
+            if event.jhat.value == 0:
+                message = f"Hat {event.jhat.hat} centered (device: {event.jhat.which})"
+            else:
+                message = f"Hat {event.jhat.hat} event {HAT_VALUES[event.jhat.value]} (device: {event.jhat.which})"
         elif event.type == SDL_JOYBUTTONDOWN:
             message = (
                 f"Button {event.jbutton.button} pressed (device: {event.jbutton.which})"
