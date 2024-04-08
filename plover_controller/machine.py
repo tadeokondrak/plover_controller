@@ -20,7 +20,7 @@ import ctypes
 import re
 import plover
 import plover.misc
-from util import get_keys_for_stroke
+from .util import get_keys_for_stroke
 from copy import copy
 from dataclasses import dataclass
 from math import atan2, floor, hypot, sqrt, tau
