@@ -14,17 +14,19 @@
 # You should have received a copy of the GNU General Public License along
 # with this program; if not, write to the Free Software Foundation, Inc.,
 # 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+import itertools
 import sdl2
 import threading
 import ctypes
 import re
 import plover
 import plover.misc
+import typing
 from .util import get_keys_for_stroke
 from copy import copy
 from dataclasses import dataclass
 from math import atan2, floor, hypot, sqrt, tau
-from typing import Callable
+from typing import Any, Callable, Optional
 from PyQt5.QtCore import QVariant, pyqtSignal, Qt
 from PyQt5.QtGui import QFont
 from plover.resource import resource_exists, resource_filename
@@ -79,7 +81,7 @@ mapping_path = "asset:plover_controller:assets/default_mapping.txt"
 if not resource_exists(mapping_path):
     raise Exception("couldn't find default mapping file")
 
-with open(resource_filename(mapping_path), "r") as f:
+with open(typing.cast(str, resource_filename(mapping_path)), "r") as f:
     DEFAULT_MAPPING = f.read()
 
 
@@ -104,12 +106,23 @@ class Button:
     button: str
 
 
-def parse_mappings(text):
-    sticks = {}
-    buttons = {}
-    triggers = {}
-    ordered_mappings = {}
-    unordered_mappings = []
+@dataclass
+class ParseMappingsResult:
+    sticks: dict[str, Stick]
+    buttons: dict[str, Button]
+    triggers: dict[str, Trigger]
+    unordered_mappings: list[tuple[list[str], tuple[str, ...]]]
+    ordered_mappings: dict[tuple[str, ...], tuple[str, ...]]
+
+
+def parse_mappings(text: str) -> ParseMappingsResult:
+    result = ParseMappingsResult(
+        sticks={},
+        buttons={},
+        triggers={},
+        ordered_mappings={},
+        unordered_mappings=[],
+    )
     for line in text.splitlines():
         if not line or line.startswith("//"):
             continue
@@ -124,13 +137,13 @@ def parse_mappings(text):
                 offset=float(match[5]),
                 segments=match[2].split(","),
             )
-            sticks[stick.name] = stick
+            result.sticks[stick.name] = stick
         elif match := re.match(r"([a-z0-9,]+) -> ([A-Z-*#]+)", line):
             lhs = match[1].split(",")
             rhs = get_keys_for_stroke(match[2])
-            unordered_mappings.append((lhs, rhs))
+            result.unordered_mappings.append((lhs, rhs))
         elif match := re.match(r"(\w+)\(([a-z,]+)\) -> ([A-Z-*#]+)", line):
-            ordered_mappings[
+            result.ordered_mappings[
                 tuple(f"{match[1]}{pos}" for pos in match[2].split(","))
             ] = get_keys_for_stroke(match[3])
         elif match := re.match(r"button (\d+) is ([a-z0-9]+)", line):
@@ -138,26 +151,23 @@ def parse_mappings(text):
                 name=match[2],
                 button=f"b{match[1]}",
             )
-            buttons[button.button] = button
+            result.buttons[button.button] = button
         elif match := re.match(r"trigger on axis (\d+) is ([a-z0-9]+)", line):
             trigger = Trigger(
                 name=match[2],
                 axis=f"a{match[1]}",
             )
-            triggers[trigger.axis] = trigger
+            result.triggers[trigger.axis] = trigger
         else:
             print(f"don't know how to parse '{line}', skipping")
-    return (
-        sticks,
-        buttons,
-        triggers,
-        unordered_mappings,
-        ordered_mappings,
-    )
+    return result
 
 
-def buttons_to_keys(in_keys, unordered_mappings):
-    keys = set()
+def buttons_to_keys(
+    in_keys: set[str],
+    unordered_mappings: list[tuple[list[str], tuple[str, ...]]],
+) -> set[str]:
+    keys: set[str] = set()
     for chord, result in unordered_mappings:
         if all(map(lambda x: x in in_keys, chord)):
             for key in chord:
@@ -180,7 +190,7 @@ def get_controller_thread():
 
 class ControllerThread(threading.Thread):
     lock = threading.Lock()
-    set_hint_event_type = None
+    set_hint_event_type: Optional[int] = None
     listeners: set[Callable[[SDL_Event], None]] = set()
 
     def __init__(self):
@@ -194,13 +204,13 @@ class ControllerThread(threading.Thread):
             SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK)
             self.set_hint_event_type = SDL_RegisterEvents(1)
 
-            for i in range(SDL_NumJoysticks()):
-                js = SDL_JoystickOpen(i)
+            for i in range(typing.cast(int, SDL_NumJoysticks())):
+                SDL_JoystickOpen(i)
 
         event = SDL_Event()
         while True:
             if not SDL_WaitEvent(event):
-                error = SDL_GetError()
+                error = typing.cast(bytes, SDL_GetError())
                 if error:
                     raise Exception(f"SDL error occurred: {error.decode('utf-8')}")
                 else:
@@ -225,7 +235,7 @@ class ControllerThread(threading.Thread):
         with self.lock:
             self.listeners.remove(listener)
 
-    def set_hint(self, name, value):
+    def set_hint(self, name: bytes, value: bytes):
         with self.lock:
             event = SDL_Event()
             event.type = self.set_hint_event_type
@@ -243,31 +253,28 @@ class ControllerMachine(StenotypeBase):
                A- O- -E -U
     """
 
-    _controller = None
-    _controller_instance_id = None
-    _stick_states = {}
-    _chord_groups = {}
-    _trigger_states = {}
-    _pressed_buttons = set()
-    _unsequenced_buttons = set()
-    _pending_keys = set()
-    _pending_stick_movements = {}
-    _unordered_mappings = []
-    _ordered_mappings = {}
-    _sticks = {}
-    _buttons = {}
-    _triggers = {}
+    _params = {}
+    _stick_states: dict[str, float] = {}
+    _trigger_states: dict[str, float] = {}
+    _pressed_buttons: set[str] = set()
+    _unsequenced_buttons: set[str] = set()
+    _pending_keys: set[str] = set()
+    _pending_stick_movements: dict[str, list[str]] = {}
+    unordered_mappings: list[tuple[list[str], tuple[str, ...]]] = []
+    ordered_mappings: dict[tuple[str, ...], tuple[str, ...]] = {}
+    _sticks: dict[str, Stick] = {}
+    _buttons: dict[str, Button] = {}
+    _triggers: dict[str, Trigger] = {}
 
-    def __init__(self, params):
+    def __init__(self, params: dict[str, Any]):
         super().__init__()
         self._params = params
-        (
-            self._sticks,
-            self._buttons,
-            self._triggers,
-            self._unordered_mappings,
-            self._ordered_mappings,
-        ) = parse_mappings(self._params["mapping"])
+        mappings = parse_mappings(self._params["mapping"])
+        self._sticks = mappings.sticks
+        self._buttons = mappings.buttons
+        self._triggers = mappings.triggers
+        self._unordered_mappings = mappings.unordered_mappings
+        self._ordered_mappings = mappings.ordered_mappings
 
     def start_capture(self):
         self._initializing()
@@ -290,7 +297,7 @@ class ControllerMachine(StenotypeBase):
         self._stopped()
 
     @classmethod
-    def get_option_info(cls):
+    def get_option_info(cls) -> dict[str, tuple[Any, Any]]:
         return {
             "mapping": (DEFAULT_MAPPING, str),
             "timeout": (1.0, float),
@@ -320,8 +327,11 @@ class ControllerMachine(StenotypeBase):
         value = float(event.value) / 32768
         if axis in self._triggers:
             self._trigger_states[axis] = value
-        elif axis in sum(
-            map(lambda x: [x.x_axis, x.y_axis], self._sticks.values()), []
+        elif axis in set(
+            itertools.chain(
+                map(lambda stick: stick.x_axis, self._sticks.values()),
+                map(lambda stick: stick.y_axis, self._sticks.values()),
+            ),
         ):
             self._stick_states[axis] = value
         self.check_axes()
@@ -409,11 +419,10 @@ class ControllerMachine(StenotypeBase):
             if val > 0:
                 self._unsequenced_buttons.add(trigger.name)
 
-    def check_stick(self, stick: Stick, lr, ud):
+    def check_stick(self, stick: Stick, lr: float, ud: float):
         if hypot(lr, ud) < self._params["stick_dead_zone"] * sqrt(2):
             return
         offset = stick.offset / 360 * tau
-        segment_size = tau / len(stick.segments)
         angle = atan2(ud, lr) - offset
         while angle < 0:
             angle += tau
