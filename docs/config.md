@@ -77,6 +77,13 @@ Syntax:
 <name> -> <stroke>
 ```
 
+Note that except for bindings like `*`, a hyphen is *required* in the `<stroke>` portion.
+
+Good: `S-`, `-S`, `PW-FP`, `KA-T`
+Bad: `S`, `KAT`
+
+This applies to the following categories as well.
+
 ## Simple stick/hat mappings
 
 Example:
