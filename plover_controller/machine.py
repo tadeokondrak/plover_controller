@@ -14,6 +14,7 @@
 # You should have received a copy of the GNU General Public License along
 # with this program; if not, write to the Free Software Foundation, Inc.,
 # 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+from dataclasses import dataclass
 import itertools
 from math import cos, sin, sqrt, tau
 import sdl2
@@ -22,8 +23,6 @@ import ctypes
 import typing
 from plover_controller.config import (
     Stick,
-    Trigger,
-    ButtonOrHat,
     Mappings,
 )
 from .util import stick_segment, buttons_to_keys
@@ -112,6 +111,70 @@ with open(typing.cast(str, resource_filename(mapping_path)), "r") as f:
     DEFAULT_MAPPING = f.read()
 
 
+@dataclass
+class Event:
+    @classmethod
+    def from_sdl(cls, ev: SDL_Event) -> Optional["Event"]:
+        match ev.type:
+            case sdl2.SDL_JOYAXISMOTION:
+                return AxisEvent(
+                    axis=ev.jaxis.axis,
+                    value=float(ev.jaxis.value) / 32768,
+                    device=ev.jaxis.which,
+                )
+            case sdl2.SDL_JOYBALLMOTION:
+                return BallEvent(ball=ev.jball.ball, device=ev.jball.which)
+            case sdl2.SDL_JOYHATMOTION:
+                return HatEvent(
+                    hat=ev.jhat.hat, value=ev.jhat.value, device=ev.jhat.which
+                )
+            case sdl2.SDL_JOYBUTTONDOWN:
+                return ButtonEvent(
+                    state=True, button=ev.jbutton.button, device=ev.jbutton.which
+                )
+            case sdl2.SDL_JOYBUTTONUP:
+                return ButtonEvent(
+                    state=False, button=ev.jbutton.button, device=ev.jbutton.which
+                )
+            case sdl2.SDL_JOYDEVICEADDED:
+                return DeviceEvent(added=True, which=ev.jdevice.which)
+            case sdl2.SDL_JOYDEVICEREMOVED:
+                return DeviceEvent(added=False, which=ev.jdevice.which)
+
+
+@dataclass
+class AxisEvent(Event):
+    axis: int
+    value: float
+    device: int
+
+
+@dataclass
+class BallEvent(Event):
+    ball: int
+    device: int
+
+
+@dataclass
+class HatEvent(Event):
+    hat: int
+    value: int
+    device: int
+
+
+@dataclass
+class ButtonEvent(Event):
+    button: int
+    state: bool
+    device: int
+
+
+@dataclass
+class DeviceEvent(Event):
+    which: int
+    added: bool
+
+
 controller_thread_instance = None
 
 
@@ -127,7 +190,7 @@ def get_controller_thread():
 class ControllerThread(threading.Thread):
     lock = threading.Lock()
     set_hint_event_type: Optional[int] = None
-    listeners: set[Callable[[SDL_Event], None]] = set()
+    listeners: set[Callable[[Event], None]] = set()
 
     def __init__(self):
         super().__init__()
@@ -160,14 +223,15 @@ class ControllerThread(threading.Thread):
                     SDL_free(event.user.data1)
                     SDL_free(event.user.data2)
                 else:
-                    for listener in self.listeners:
-                        listener(event)
+                    if converted_event := Event.from_sdl(event):
+                        for listener in self.listeners:
+                            listener(converted_event)
 
-    def add_listener(self, listener: Callable[[SDL_Event], None]):
+    def add_listener(self, listener: Callable[[Event], None]):
         with self.lock:
             self.listeners.add(listener)
 
-    def remove_listener(self, listener: Callable[[SDL_Event], None]):
+    def remove_listener(self, listener: Callable[[Event], None]):
         with self.lock:
             self.listeners.remove(listener)
 
@@ -197,38 +261,38 @@ class ControllerState:
         self._mappings = Mappings.parse(self._params["mapping"])
         self._notify = notify
 
-    def _handle_sdl_event(self, event: SDL_Event):
-        if event.type == SDL_JOYAXISMOTION:
-            self._handle_axis(event.jaxis)
-        elif event.type == SDL_JOYBALLMOTION:
-            self._handle_ball(event.jball)
-        elif event.type == SDL_JOYHATMOTION:
-            self._handle_hat(event.jhat)
-        elif event.type in [SDL_JOYBUTTONDOWN, SDL_JOYBUTTONUP]:
-            self._handle_button(event.jbutton)
-        elif event.type in [SDL_JOYDEVICEADDED, SDL_JOYDEVICEREMOVED]:
-            self._handle_device(event.jdevice)
+    def _handle_event(self, event: Event):
+        match event:
+            case AxisEvent() as axis_event:
+                self._handle_axis_event(axis_event)
+            case BallEvent() as ball_event:
+                self._handle_ball_event(ball_event)
+            case HatEvent() as hat_event:
+                self._handle_hat_event(hat_event)
+            case ButtonEvent() as button_event:
+                self._handle_button_event(button_event)
+            case DeviceEvent() as device_event:
+                self._handle_device_event(device_event)
 
-    def _handle_axis(self, event: SDL_JoyAxisEvent):
+    def _handle_axis_event(self, event: AxisEvent):
         axis = f"a{event.axis}"
-        value = float(event.value) / 32768
         if axis in self._mappings.triggers:
-            self._trigger_states[axis] = value
+            self._trigger_states[axis] = event.value
         elif axis in set(
             itertools.chain(
                 map(lambda stick: stick.x_axis, self._mappings.sticks.values()),
                 map(lambda stick: stick.y_axis, self._mappings.sticks.values()),
             ),
         ):
-            self._stick_states[axis] = value
+            self._stick_states[axis] = event.value
         self.check_axes()
         self.maybe_complete_ordered_chord()
         self.maybe_complete_stroke()
 
-    def _handle_ball(self, event: SDL_JoyBallEvent):
+    def _handle_ball_event(self, event: BallEvent):
         pass
 
-    def _handle_hat(self, event: SDL_JoyHatEvent):
+    def _handle_hat_event(self, event: HatEvent):
         hat = f"h{event.hat}"
         if button_entry := self._mappings.buttons_and_hats.get(hat):
             hat = button_entry.name
@@ -241,7 +305,7 @@ class ControllerState:
             if specific_hat not in self._unsequenced_buttons_and_hats:
                 self._unsequenced_buttons_and_hats.add(specific_hat)
 
-    def _handle_button(self, event: SDL_JoyButtonEvent):
+    def _handle_button_event(self, event: ButtonEvent):
         button = f"b{event.button}"
         if button_entry := self._mappings.buttons_and_hats.get(button):
             button = button_entry.name
@@ -253,8 +317,8 @@ class ControllerState:
             self._currently_pressed_buttons_and_hats.discard(button)
             self.maybe_complete_stroke()
 
-    def _handle_device(self, event: SDL_JoyDeviceEvent):
-        if event.type == SDL_JOYDEVICEADDED:
+    def _handle_device_event(self, event: DeviceEvent):
+        if event.added:
             SDL_JoystickOpen(event.which)
 
     def maybe_complete_ordered_chord(self):
@@ -354,7 +418,7 @@ class ControllerMachine(StenotypeBase):
 
     def start_capture(self):
         self._initializing()
-        get_controller_thread().add_listener(self._state._handle_sdl_event)
+        get_controller_thread().add_listener(self._state._handle_event)
         hints = [
             (SDL_HINT_JOYSTICK_HIDAPI, self._state._params["use_hidapi"]),
             (SDL_HINT_JOYSTICK_RAWINPUT, self._state._params["use_rawinput"]),
@@ -369,7 +433,7 @@ class ControllerMachine(StenotypeBase):
         self._ready()
 
     def stop_capture(self):
-        get_controller_thread().remove_listener(self._state._handle_sdl_event)
+        get_controller_thread().remove_listener(self._state._handle_event)
         self._stopped()
 
     @classmethod
@@ -472,45 +536,45 @@ class ControllerOption(QGroupBox):
         self._form_layout.addRow(self._feedback_label, self._feedback_output_label)
         self.other_message.connect(self._feedback_output_label.setText)
 
-        get_controller_thread().add_listener(self._handle_sdl_event)
+        get_controller_thread().add_listener(self._handle_event)
 
         def handle_destroy():
-            get_controller_thread().remove_listener(self._handle_sdl_event)
+            get_controller_thread().remove_listener(self._handle_event)
 
         self.destroyed.connect(handle_destroy)
 
-    def _handle_sdl_event(self, event: SDL_Event):
-        if event.type == SDL_JOYAXISMOTION:
-            if event.jaxis.value / 32768 < 0.25:
+    def _handle_event(self, event: Event):
+        match event:
+            case AxisEvent(axis, value, device):
+                if value < 0.25:
+                    return
+                message = f"Axis {axis} motion (device: {device})"
+                if message != self._last_axis_message:
+                    try:
+                        self.axis_message.emit(message)
+                    except RuntimeError:
+                        pass
+                self._last_axis_message = message
                 return
-            message = f"Axis {event.jaxis.axis} motion (device: {event.jaxis.which})"
-            if message != self._last_axis_message:
-                try:
-                    self.axis_message.emit(message)
-                except RuntimeError:
-                    pass
-            self._last_axis_message = message
-            return
 
-        if event.type == SDL_JOYBALLMOTION:
-            message = f"Ball {event.jball.ball} motion (device: {event.jball.which})"
-        elif event.type == SDL_JOYHATMOTION:
-            if event.jhat.value == 0:
-                message = f"Hat {event.jhat.hat} centered (device: {event.jhat.which})"
-            else:
-                message = f"Hat {event.jhat.hat} event {HAT_VALUES[event.jhat.value]} (device: {event.jhat.which})"
-        elif event.type == SDL_JOYBUTTONDOWN:
-            message = (
-                f"Button {event.jbutton.button} pressed (device: {event.jbutton.which})"
-            )
-        elif event.type == SDL_JOYBUTTONUP:
-            message = f"Button {event.jbutton.button} released (device: {event.jbutton.which})"
-        elif event.type == SDL_JOYDEVICEADDED:
-            message = f"Device {event.jdevice.which} added"
-        elif event.type == SDL_JOYDEVICEREMOVED:
-            message = f"Device {event.jdevice.which} removed"
-        else:
-            return
+            case BallEvent(ball, device):
+                message = f"Ball {ball} motion (device: {device})"
+
+            case HatEvent(hat, value, device):
+                if value == 0:
+                    message = f"Hat {hat} centered (device: {device})"
+                else:
+                    message = f"Hat {hat} event {HAT_VALUES[value]} (device: {device})"
+
+            case ButtonEvent(button, state, device):
+                message = f"Button {button} {'pressed' if state else 'released'} (device: {device})"
+
+            case DeviceEvent(which, added):
+                message = f"Device {which} {'added' if added else 'removed'}"
+
+            case _:
+                return
+
         if message != self._last_other_message:
             try:
                 self.other_message.emit(message)
@@ -614,6 +678,8 @@ class ControllerDisplayTool(Tool):
     ICON = ""
     ROLE = "controller_display_tool"
 
+    events = pyqtSignal(Event)
+
     _state: ControllerState
     _sticks: dict[str, StickWidget] = {}
     _dying: bool = False
@@ -621,14 +687,15 @@ class ControllerDisplayTool(Tool):
     def __init__(self, engine: StenoEngine):
         super().__init__(engine)
 
+        self.events.connect(self._handle_event_signal)
         self._layout = QFormLayout(self)
         self._engine.signal_connect("config_changed", self._handle_config_changed)
         self._handle_config_changed(None)
 
-        get_controller_thread().add_listener(self._handle_sdl_event)
+        get_controller_thread().add_listener(self._handle_event)
 
         def handle_destroy():
-            get_controller_thread().remove_listener(self._handle_sdl_event)
+            get_controller_thread().remove_listener(self._handle_event)
 
         self.destroyed.connect(handle_destroy)
 
@@ -654,7 +721,10 @@ class ControllerDisplayTool(Tool):
     def _make_stick_widget(self, stick: Stick):
         pass
 
-    def _handle_sdl_event(self, event: SDL_Event):
-        self._state._handle_sdl_event(event)
+    def _handle_event(self, event: Event):
+        self.events.emit(event)
+
+    def _handle_event_signal(self, event: Event):
+        self._state._handle_event(event)
         if not self._dying:
             self.update()
