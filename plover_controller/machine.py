@@ -115,31 +115,28 @@ with open(typing.cast(str, resource_filename(mapping_path)), "r") as f:
 class Event:
     @classmethod
     def from_sdl(cls, ev: SDL_Event) -> Optional["Event"]:
-        match ev.type:
-            case sdl2.SDL_JOYAXISMOTION:
-                return AxisEvent(
-                    axis=ev.jaxis.axis,
-                    value=float(ev.jaxis.value) / 32768,
-                    device=ev.jaxis.which,
-                )
-            case sdl2.SDL_JOYBALLMOTION:
-                return BallEvent(ball=ev.jball.ball, device=ev.jball.which)
-            case sdl2.SDL_JOYHATMOTION:
-                return HatEvent(
-                    hat=ev.jhat.hat, value=ev.jhat.value, device=ev.jhat.which
-                )
-            case sdl2.SDL_JOYBUTTONDOWN:
-                return ButtonEvent(
-                    state=True, button=ev.jbutton.button, device=ev.jbutton.which
-                )
-            case sdl2.SDL_JOYBUTTONUP:
-                return ButtonEvent(
-                    state=False, button=ev.jbutton.button, device=ev.jbutton.which
-                )
-            case sdl2.SDL_JOYDEVICEADDED:
-                return DeviceEvent(added=True, which=ev.jdevice.which)
-            case sdl2.SDL_JOYDEVICEREMOVED:
-                return DeviceEvent(added=False, which=ev.jdevice.which)
+        if ev.type == sdl2.SDL_JOYAXISMOTION:
+            return AxisEvent(
+                axis=ev.jaxis.axis,
+                value=float(ev.jaxis.value) / 32768,
+                device=ev.jaxis.which,
+            )
+        elif ev.type == sdl2.SDL_JOYBALLMOTION:
+            return BallEvent(ball=ev.jball.ball, device=ev.jball.which)
+        elif ev.type == sdl2.SDL_JOYHATMOTION:
+            return HatEvent(hat=ev.jhat.hat, value=ev.jhat.value, device=ev.jhat.which)
+        elif ev.type == sdl2.SDL_JOYBUTTONDOWN:
+            return ButtonEvent(
+                state=True, button=ev.jbutton.button, device=ev.jbutton.which
+            )
+        elif ev.type == sdl2.SDL_JOYBUTTONUP:
+            return ButtonEvent(
+                state=False, button=ev.jbutton.button, device=ev.jbutton.which
+            )
+        elif ev.type == sdl2.SDL_JOYDEVICEADDED:
+            return DeviceEvent(added=True, which=ev.jdevice.which)
+        elif ev.type == sdl2.SDL_JOYDEVICEREMOVED:
+            return DeviceEvent(added=False, which=ev.jdevice.which)
 
 
 @dataclass
@@ -262,17 +259,16 @@ class ControllerState:
         self._notify = notify
 
     def _handle_event(self, event: Event):
-        match event:
-            case AxisEvent() as axis_event:
-                self._handle_axis_event(axis_event)
-            case BallEvent() as ball_event:
-                self._handle_ball_event(ball_event)
-            case HatEvent() as hat_event:
-                self._handle_hat_event(hat_event)
-            case ButtonEvent() as button_event:
-                self._handle_button_event(button_event)
-            case DeviceEvent() as device_event:
-                self._handle_device_event(device_event)
+        if isinstance(event, AxisEvent):
+            self._handle_axis_event(event)
+        elif isinstance(event, BallEvent):
+            self._handle_ball_event(event)
+        elif isinstance(event, HatEvent):
+            self._handle_hat_event(event)
+        elif isinstance(event, ButtonEvent):
+            self._handle_button_event(event)
+        elif isinstance(event, DeviceEvent):
+            self._handle_device_event(event)
 
     def _handle_axis_event(self, event: AxisEvent):
         axis = f"a{event.axis}"
@@ -543,37 +539,36 @@ class ControllerOption(QGroupBox):
 
         self.destroyed.connect(handle_destroy)
 
-    def _handle_event(self, event: Event):
-        match event:
-            case AxisEvent(axis, value, device):
-                if value < 0.25:
-                    return
-                message = f"Axis {axis} motion (device: {device})"
-                if message != self._last_axis_message:
-                    try:
-                        self.axis_message.emit(message)
-                    except RuntimeError:
-                        pass
-                self._last_axis_message = message
+    def _handle_event(self, ev: Event):
+        if isinstance(ev, AxisEvent):
+            if ev.value < 0.25:
                 return
+            message = f"Axis {ev.axis} motion (device: {ev.device})"
+            if message != self._last_axis_message:
+                try:
+                    self.axis_message.emit(message)
+                except RuntimeError:
+                    pass
+            self._last_axis_message = message
+            return
 
-            case BallEvent(ball, device):
-                message = f"Ball {ball} motion (device: {device})"
+        elif isinstance(ev, BallEvent):
+            message = f"Ball {ev.ball} motion (device: {ev.device})"
 
-            case HatEvent(hat, value, device):
-                if value == 0:
-                    message = f"Hat {hat} centered (device: {device})"
-                else:
-                    message = f"Hat {hat} event {HAT_VALUES[value]} (device: {device})"
+        elif isinstance(ev, HatEvent):
+            if ev.value == 0:
+                message = f"Hat {ev.hat} centered (device: {ev.device})"
+            else:
+                message = f"Hat {ev.hat} event {HAT_VALUES[ev.value]} (device: {ev.device})"
 
-            case ButtonEvent(button, state, device):
-                message = f"Button {button} {'pressed' if state else 'released'} (device: {device})"
+        elif isinstance(ev, ButtonEvent):
+            message = f"Button {ev.button} {'pressed' if ev.state else 'released'} (device: {ev.device})"
 
-            case DeviceEvent(which, added):
-                message = f"Device {which} {'added' if added else 'removed'}"
+        elif isinstance(ev, DeviceEvent):
+            message = f"Device {ev.which} {'added' if ev.added else 'removed'}"
 
-            case _:
-                return
+        else:
+            return
 
         if message != self._last_other_message:
             try:
