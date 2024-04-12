@@ -4,6 +4,10 @@ This plugin was designed for use with [Open Steno Project's Plover](https://open
 With only a video game controller, you can harness the power of machine stenography, a shorthand writing system that's been proven effective since its inception in 1879.
 To this day, stenography is trusted for use in live captioning and court reporting, due to its high speed and accuracy.
 
+
+> [!WARNING]
+> plover_controller may not work on macOS. Only Windows and Linux have been tested successfully.
+
 ## Table of Contents
 
 1. [Learning Resources](#learning-resources)
@@ -16,6 +20,7 @@ To this day, stenography is trusted for use in live captioning and court reporti
     1. [Left Joystick](#left-joystick)
     1. [Right Joystick](#right-joystick)
     1. [Buttons](#right-joystick)
+1. [Default mapping image](#default-mapping-image)
 
 ## Learning resources
 
