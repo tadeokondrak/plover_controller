@@ -68,18 +68,6 @@ from sdl2 import (
     SDL_INIT_JOYSTICK,
     SDL_INIT_VIDEO,
     SDL_Init,
-    SDL_JoyAxisEvent,
-    SDL_JOYAXISMOTION,
-    SDL_JoyBallEvent,
-    SDL_JOYBALLMOTION,
-    SDL_JOYBUTTONDOWN,
-    SDL_JoyButtonEvent,
-    SDL_JOYBUTTONUP,
-    SDL_JOYDEVICEADDED,
-    SDL_JoyDeviceEvent,
-    SDL_JOYDEVICEREMOVED,
-    SDL_JoyHatEvent,
-    SDL_JOYHATMOTION,
     SDL_JoystickOpen,
     SDL_NumJoysticks,
     SDL_PushEvent,
@@ -122,21 +110,38 @@ class Event:
                 device=ev.jaxis.which,
             )
         elif ev.type == sdl2.SDL_JOYBALLMOTION:
-            return BallEvent(ball=ev.jball.ball, device=ev.jball.which)
+            return BallEvent(
+                ball=ev.jball.ball,
+                device=ev.jball.which,
+            )
         elif ev.type == sdl2.SDL_JOYHATMOTION:
-            return HatEvent(hat=ev.jhat.hat, value=ev.jhat.value, device=ev.jhat.which)
+            return HatEvent(
+                hat=ev.jhat.hat,
+                value=ev.jhat.value,
+                device=ev.jhat.which,
+            )
         elif ev.type == sdl2.SDL_JOYBUTTONDOWN:
             return ButtonEvent(
-                state=True, button=ev.jbutton.button, device=ev.jbutton.which
+                state=True,
+                button=ev.jbutton.button,
+                device=ev.jbutton.which,
             )
         elif ev.type == sdl2.SDL_JOYBUTTONUP:
             return ButtonEvent(
-                state=False, button=ev.jbutton.button, device=ev.jbutton.which
+                state=False,
+                button=ev.jbutton.button,
+                device=ev.jbutton.which,
             )
         elif ev.type == sdl2.SDL_JOYDEVICEADDED:
-            return DeviceEvent(added=True, which=ev.jdevice.which)
+            return DeviceEvent(
+                added=True,
+                which=ev.jdevice.which,
+            )
         elif ev.type == sdl2.SDL_JOYDEVICEREMOVED:
-            return DeviceEvent(added=False, which=ev.jdevice.which)
+            return DeviceEvent(
+                added=False,
+                which=ev.jdevice.which,
+            )
 
 
 @dataclass
@@ -221,6 +226,9 @@ class ControllerThread(threading.Thread):
                     SDL_free(event.user.data2)
                 else:
                     if converted_event := Event.from_sdl(event):
+                        if isinstance(converted_event, DeviceEvent):
+                            if converted_event.added:
+                                SDL_JoystickOpen(converted_event.which)
                         for listener in self.listeners:
                             listener(converted_event)
 
@@ -242,14 +250,25 @@ class ControllerThread(threading.Thread):
 
 
 class ControllerState:
+    # Machine settings
     _params: dict[str, Any] = {}
+    # Parsed configuration file
     _mappings: Mappings = Mappings.empty()
+    # Last received axis values for mapped sticks, keyed by a{int}
     _stick_states: dict[str, float] = {}
+    # Last received axis values for mapped triggers, keyed by a{int}
     _trigger_states: dict[str, float] = {}
-    _currently_pressed_buttons_and_hats: set[str] = set()
-    _unsequenced_buttons_and_hats: set[str] = set()
+    # Last received values for hats, keyed by alias
+    _hat_states: dict[str, int] = {}
+    # Keys fully triggered by completed chords
     _pending_keys: set[str] = set()
     _pending_stick_movements: dict[str, list[str]] = {}
+    _pending_hat_values: dict[str, set[int]] = {}
+    _unsequenced_buttons_and_hats: set[str] = set()
+    # All buttons currently pressed
+    _currently_pressed_buttons: set[str] = set()
+    _currently_uncentered_hats: set[str] = set()
+    # Function called with stroke data when complete
     _notify: Callable[[list[str]], None]
 
     def __init__(self, params: dict[str, Any], notify: Callable[[list[str]], None]):
@@ -290,32 +309,49 @@ class ControllerState:
 
     def _handle_hat_event(self, event: HatEvent):
         hat = f"h{event.hat}"
-        if button_entry := self._mappings.buttons_and_hats.get(hat):
-            hat = button_entry.name
+        if hat_entry := self._mappings.hats.get(hat):
+            hat = hat_entry.renamed
+        self._hat_states[hat] = event.value
         if event.value == 0:
-            self._currently_pressed_buttons_and_hats.discard(hat)
+            self.complete_hat(hat)
+            self._currently_uncentered_hats.discard(hat)
             self.maybe_complete_stroke()
         else:
-            self._currently_pressed_buttons_and_hats.add(hat)
-            specific_hat = f"{hat}{HAT_VALUES[event.value]}"
-            if specific_hat not in self._unsequenced_buttons_and_hats:
-                self._unsequenced_buttons_and_hats.add(specific_hat)
+            self._currently_uncentered_hats.add(hat)
+            self._pending_hat_values.setdefault(hat, set()).add(event.value)
 
     def _handle_button_event(self, event: ButtonEvent):
         button = f"b{event.button}"
-        if button_entry := self._mappings.buttons_and_hats.get(button):
-            button = button_entry.name
+        if button_entry := self._mappings.buttons.get(button):
+            button = button_entry.renamed
         if event.state:
-            self._currently_pressed_buttons_and_hats.add(button)
+            self._currently_pressed_buttons.add(button)
             if button not in self._unsequenced_buttons_and_hats:
                 self._unsequenced_buttons_and_hats.add(button)
         else:
-            self._currently_pressed_buttons_and_hats.discard(button)
+            self._currently_pressed_buttons.discard(button)
             self.maybe_complete_stroke()
 
     def _handle_device_event(self, event: DeviceEvent):
-        if event.added:
-            SDL_JoystickOpen(event.which)
+        pass
+
+    def complete_hat(self, hat: str):
+        pending_values = self._pending_hat_values.get(hat, set())
+        if SDL_HAT_RIGHTUP in pending_values:
+            pending_values.discard(SDL_HAT_RIGHT)
+            pending_values.discard(SDL_HAT_UP)
+        if SDL_HAT_RIGHTDOWN in pending_values:
+            pending_values.discard(SDL_HAT_RIGHT)
+            pending_values.discard(SDL_HAT_DOWN)
+        if SDL_HAT_LEFTUP in pending_values:
+            pending_values.discard(SDL_HAT_LEFT)
+            pending_values.discard(SDL_HAT_UP)
+        if SDL_HAT_LEFTDOWN in pending_values:
+            pending_values.discard(SDL_HAT_LEFT)
+            pending_values.discard(SDL_HAT_DOWN)
+        for value in pending_values:
+            self._unsequenced_buttons_and_hats.add(f"{hat}{HAT_VALUES[value]}")
+        del self._pending_hat_values[hat]
 
     def maybe_complete_ordered_chord(self):
         for stick in self._mappings.sticks.values():
@@ -329,16 +365,14 @@ class ControllerState:
                 )
             ):
                 continue
-            pending_stick_movements = self._pending_stick_movements.get(stick.name, [])
+            pending_movements = self._pending_stick_movements.get(stick.name, [])
             if (
-                result := self._mappings.ordered_mappings.get(
-                    tuple(pending_stick_movements)
-                )
+                result := self._mappings.ordered_mappings.get(tuple(pending_movements))
             ) is not None:
                 self._pending_stick_movements[stick.name] = []
                 self._pending_keys.update(result)
             else:
-                for key in pending_stick_movements:
+                for key in pending_movements:
                     self._unsequenced_buttons_and_hats.add(key)
                 self._pending_stick_movements[stick.name] = []
 
@@ -354,7 +388,7 @@ class ControllerState:
             return
         if any(map(lambda v: v > 0, self._trigger_states.values())):
             return
-        if self._currently_pressed_buttons_and_hats:
+        if self._currently_pressed_buttons or self._currently_uncentered_hats:
             return
         keys = buttons_to_keys(
             self._unsequenced_buttons_and_hats,
@@ -372,9 +406,9 @@ class ControllerState:
             ud = self._stick_states.get(stick.y_axis, 0.0)
             self.check_stick(stick, lr, ud)
         for trigger in self._mappings.triggers.values():
-            val = self._trigger_states.get(trigger.axis, 0)
+            val = self._trigger_states.get(trigger.actual, 0)
             if val > 0:
-                self._unsequenced_buttons_and_hats.add(trigger.name)
+                self._unsequenced_buttons_and_hats.add(trigger.renamed)
 
     def check_stick(self, stick: Stick, lr: float, ud: float):
         segment_index = stick_segment(
@@ -559,7 +593,9 @@ class ControllerOption(QGroupBox):
             if ev.value == 0:
                 message = f"Hat {ev.hat} centered (device: {ev.device})"
             else:
-                message = f"Hat {ev.hat} event {HAT_VALUES[ev.value]} (device: {ev.device})"
+                message = (
+                    f"Hat {ev.hat} event {HAT_VALUES[ev.value]} (device: {ev.device})"
+                )
 
         elif isinstance(ev, ButtonEvent):
             message = f"Button {ev.button} {'pressed' if ev.state else 'released'} (device: {ev.device})"

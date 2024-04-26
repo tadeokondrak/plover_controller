@@ -19,16 +19,17 @@ class Trigger:
 
 
 @dataclass
-class ButtonOrHat:
-    name: str
-    button: str
+class Alias:
+    renamed: str
+    actual: str
 
 
 @dataclass
 class Mappings:
     sticks: dict[str, Stick]
-    buttons_and_hats: dict[str, ButtonOrHat]
-    triggers: dict[str, Trigger]
+    hats: dict[str, Alias]
+    buttons: dict[str, Alias]
+    triggers: dict[str, Alias]
     unordered_mappings: list[tuple[list[str], tuple[str, ...]]]
     ordered_mappings: dict[tuple[str, ...], tuple[str, ...]]
 
@@ -36,7 +37,8 @@ class Mappings:
     def empty(cls) -> "Mappings":
         return Mappings(
             sticks={},
-            buttons_and_hats={},
+            hats={},
+            buttons={},
             triggers={},
             ordered_mappings={},
             unordered_mappings=[],
@@ -69,23 +71,23 @@ class Mappings:
                     tuple(f"{match[1]}{pos}" for pos in match[2].split(","))
                 ] = get_keys_for_stroke(match[3])
             elif match := re.match(r"button (\d+) is ([a-z0-9]+)", line):
-                button = ButtonOrHat(
-                    name=match[2],
-                    button=f"b{match[1]}",
+                alias = Alias(
+                    renamed=match[2],
+                    actual=f"b{match[1]}",
                 )
-                result.buttons_and_hats[button.button] = button
+                result.buttons[alias.actual] = alias
             elif match := re.match(r"hat (\d+) is ([a-z0-9]+)", line):
-                button = ButtonOrHat(
-                    name=match[2],
-                    button=f"h{match[1]}",
+                alias = Alias(
+                    renamed=match[2],
+                    actual=f"h{match[1]}",
                 )
-                result.buttons_and_hats[button.button] = button
+                result.hats[alias.actual] = alias
             elif match := re.match(r"trigger on axis (\d+) is ([a-z0-9]+)", line):
-                trigger = Trigger(
-                    name=match[2],
-                    axis=f"a{match[1]}",
+                alias = Alias(
+                    renamed=match[2],
+                    actual=f"a{match[1]}",
                 )
-                result.triggers[trigger.axis] = trigger
+                result.triggers[alias.actual] = alias
             else:
                 print(f"don't know how to parse '{line}', skipping")
         return result

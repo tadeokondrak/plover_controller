@@ -3,7 +3,7 @@ from typing import Optional
 
 
 def get_keys_for_stroke(stroke_str: str) -> tuple[str, ...]:
-    keys: list[str] = []
+    keys = list[str]()
     passed_hyphen = False
     no_hyphen_keys = set("!@#$%^&*")
     for key in stroke_str:
@@ -23,7 +23,7 @@ def buttons_to_keys(
     in_keys: set[str],
     unordered_mappings: list[tuple[list[str], tuple[str, ...]]],
 ) -> set[str]:
-    keys: set[str] = set()
+    keys = set[str]()
     for chord, result in unordered_mappings:
         if all(map(lambda x: x in in_keys, chord)):
             for key in chord:
