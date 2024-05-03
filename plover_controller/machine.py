@@ -684,7 +684,7 @@ class StickWidget(QWidget):
         angle = self.stick.offset / 360 * tau - tau / 4
         step = tau / len(self.stick.segments)
         for segment in self.stick.segments:
-            x, y = sin(angle), cos(angle)
+            x, y = -sin(angle), cos(angle)
             painter.setPen(QPen(Qt.black, 1, Qt.DotLine))
             painter.drawLine(QLineF(convx(0), convy(0), convx(x), convy(y)))
 
@@ -693,7 +693,7 @@ class StickWidget(QWidget):
             text_height = font_metrics.height() / height
 
             midx, midy = (
-                sin(angle + step / 2) * 0.9 - text_width / 2,
+                -sin(angle + step / 2) * 0.9 - text_width / 2,
                 cos(angle + step / 2) * 0.9 + text_height / 2,
             )
             painter.setPen(QPen(Qt.black, 1, Qt.SolidLine))
