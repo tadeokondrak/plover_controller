@@ -270,6 +270,8 @@ class ControllerState:
     _currently_uncentered_hats: set[str] = set()
     # Function called with stroke data when complete
     _notify: Callable[[list[str]], None]
+    # Whether a stick was in the deadzone in the previous check
+    _fresh_from_deadzone: dict[str, bool] = {}
 
     def __init__(self, params: dict[str, Any], notify: Callable[[list[str]], None]):
         super().__init__()
@@ -301,7 +303,6 @@ class ControllerState:
         ):
             self._stick_states[axis] = event.value
         self.check_axes()
-        self.maybe_complete_ordered_chord()
         self.maybe_complete_stroke()
 
     def _handle_ball_event(self, event: BallEvent):
@@ -353,18 +354,35 @@ class ControllerState:
             self._unsequenced_buttons_and_hats.add(f"{hat}{HAT_VALUES[value]}")
         del self._pending_hat_values[hat]
 
-    def maybe_complete_ordered_chord(self):
+    def any_active_inputs(self):
+        return (
+            any(
+                abs(v) > self._params["stroke_end_threshold"]
+                for v in self._stick_states.values()
+            )
+            or any(v > 0 for v in self._trigger_states.values())
+            or self._currently_pressed_buttons
+            or self._currently_uncentered_hats
+        )
+
+    def process_stick_movements(self):
+        if self.any_active_inputs():
+            return
+
+        def process(start_idx, end_idx):
+            if start_idx == end_idx:
+                for key in pending_movements[start_idx:]:
+                    self._unsequenced_buttons_and_hats.add(key)
+            else:
+                key = tuple(pending_movements[start_idx:end_idx])
+                ordered_mapping = self._mappings.ordered_mappings.get(key)
+                if ordered_mapping is not None:
+                    self._pending_keys.update(ordered_mapping)
+                    process(end_idx, len(pending_movements))
+                else:
+                    process(start_idx, end_idx - 1)
+
         for stick in self._mappings.sticks.values():
-            if any(
-                map(
-                    lambda v: abs(v) > self._params["stroke_end_threshold"],
-                    (
-                        self._stick_states.get(axis, 0.0)
-                        for axis in [stick.x_axis, stick.y_axis]
-                    ),
-                )
-            ):
-                continue
             pending_movements = self._pending_stick_movements.get(stick.name, [])
             if (
                 result := self._mappings.ordered_mappings.get(tuple(pending_movements))
@@ -374,21 +392,15 @@ class ControllerState:
             else:
                 for key in pending_movements:
                     self._unsequenced_buttons_and_hats.add(key)
-                self._pending_stick_movements[stick.name] = []
+
+        for stick in self._mappings.sticks.values():
+            pending_movements = self._pending_stick_movements.get(stick.name, [])
+            process(0, len(pending_movements))
+            self._pending_stick_movements[stick.name] = []
 
     def maybe_complete_stroke(self):
-        if not self._unsequenced_buttons_and_hats and not self._pending_keys:
-            return
-        if any(
-            map(
-                lambda v: abs(v) > self._params["stroke_end_threshold"],
-                self._stick_states.values(),
-            )
-        ):
-            return
-        if any(map(lambda v: v > 0, self._trigger_states.values())):
-            return
-        if self._currently_pressed_buttons or self._currently_uncentered_hats:
+        self.process_stick_movements()
+        if self.any_active_inputs():
             return
         keys = buttons_to_keys(
             self._unsequenced_buttons_and_hats,
@@ -418,14 +430,19 @@ class ControllerState:
             lr=lr,
             ud=ud,
         )
+        if stick.name not in self._pending_stick_movements:
+            self._pending_stick_movements[stick.name] = []
+        if stick.name not in self._fresh_from_deadzone:
+            self._fresh_from_deadzone[stick.name] = True
         if segment_index is not None:
             direction = stick.segments[segment_index]
             segment_name = f"{stick.name}{direction}"
-            if stick.name not in self._pending_stick_movements:
-                self._pending_stick_movements[stick.name] = []
             inorder_list = self._pending_stick_movements[stick.name]
             if len(inorder_list) == 0 or segment_name != inorder_list[-1]:
                 inorder_list.append(segment_name)
+            self._fresh_from_deadzone[stick.name] = False
+        else:
+            self._fresh_from_deadzone[stick.name] = True
 
 
 class ControllerMachine(StenotypeBase):
