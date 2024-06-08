@@ -301,7 +301,6 @@ class ControllerState:
         ):
             self._stick_states[axis] = event.value
         self.check_axes()
-        self.maybe_complete_ordered_chord()
         self.maybe_complete_stroke()
 
     def _handle_ball_event(self, event: BallEvent):
@@ -353,42 +352,38 @@ class ControllerState:
             self._unsequenced_buttons_and_hats.add(f"{hat}{HAT_VALUES[value]}")
         del self._pending_hat_values[hat]
 
-    def maybe_complete_ordered_chord(self):
-        for stick in self._mappings.sticks.values():
-            if any(
-                map(
-                    lambda v: abs(v) > self._params["stroke_end_threshold"],
-                    (
-                        self._stick_states.get(axis, 0.0)
-                        for axis in [stick.x_axis, stick.y_axis]
-                    ),
-                )
-            ):
-                continue
-            pending_movements = self._pending_stick_movements.get(stick.name, [])
-            if (
-                result := self._mappings.ordered_mappings.get(tuple(pending_movements))
-            ) is not None:
-                self._pending_stick_movements[stick.name] = []
-                self._pending_keys.update(result)
-            else:
-                for key in pending_movements:
+    def any_active_inputs(self):
+      return (
+          any(abs(v) > self._params["stroke_end_threshold"] for v in self._stick_states.values()) or
+          any(v > 0 for v in self._trigger_states.values()) or
+          self._currently_pressed_buttons or
+          self._currently_uncentered_hats
+      )
+
+    def process_stick_movements(self):
+        if self.any_active_inputs():
+            return
+        def process(start_idx,end_idx):
+            if start_idx-end_idx == 0:
+                for key in pending_movements[start_idx:len(pending_movements)]:
                     self._unsequenced_buttons_and_hats.add(key)
-                self._pending_stick_movements[stick.name] = []
+            else:
+                result = self._mappings.ordered_mappings.get(tuple( pending_movements[start_idx:end_idx] ))
+                if result is not None:
+                    self._pending_keys.update(result)
+                    process(end_idx, len(pending_movements))
+                else:
+                    process(start_idx, end_idx-1)
+        for stick in self._mappings.sticks.values():
+            pending_movements = self._pending_stick_movements.get(stick.name, [])
+            process(0, len(pending_movements))
+            self._pending_stick_movements[stick.name] = []
 
     def maybe_complete_stroke(self):
+        self.process_stick_movements()
         if not self._unsequenced_buttons_and_hats and not self._pending_keys:
             return
-        if any(
-            map(
-                lambda v: abs(v) > self._params["stroke_end_threshold"],
-                self._stick_states.values(),
-            )
-        ):
-            return
-        if any(map(lambda v: v > 0, self._trigger_states.values())):
-            return
-        if self._currently_pressed_buttons or self._currently_uncentered_hats:
+        if self.any_active_inputs():
             return
         keys = buttons_to_keys(
             self._unsequenced_buttons_and_hats,
