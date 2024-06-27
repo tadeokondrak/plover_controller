@@ -270,6 +270,8 @@ class ControllerState:
     _currently_uncentered_hats: set[str] = set()
     # Function called with stroke data when complete
     _notify: Callable[[list[str]], None]
+    # Whether a stick was in the deadzone in the previous check
+    _fresh_from_deadzone: dict[str, bool] = {}
 
     def __init__(self, params: dict[str, Any], notify: Callable[[list[str]], None]):
         super().__init__()
@@ -411,14 +413,19 @@ class ControllerState:
             lr=lr,
             ud=ud,
         )
+        if stick.name not in self._pending_stick_movements:
+            self._pending_stick_movements[stick.name] = []
+        if stick.name not in self._fresh_from_deadzone:
+            self._fresh_from_deadzone[stick.name] = True
         if segment_index is not None:
             direction = stick.segments[segment_index]
             segment_name = f"{stick.name}{direction}"
-            if stick.name not in self._pending_stick_movements:
-                self._pending_stick_movements[stick.name] = []
             inorder_list = self._pending_stick_movements[stick.name]
-            if len(inorder_list) == 0 or segment_name != inorder_list[-1]:
+            if len(inorder_list) == 0 or self._fresh_from_deadzone[stick.name] or segment_name != inorder_list[-1]:
                 inorder_list.append(segment_name)
+            self._fresh_from_deadzone[stick.name] = False
+        else:
+            self._fresh_from_deadzone[stick.name] = True
 
 
 class ControllerMachine(StenotypeBase):
