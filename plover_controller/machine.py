@@ -381,8 +381,6 @@ class ControllerState:
 
     def maybe_complete_stroke(self):
         self.process_stick_movements()
-        if not self._unsequenced_buttons_and_hats and not self._pending_keys:
-            return
         if self.any_active_inputs():
             return
         keys = buttons_to_keys(
