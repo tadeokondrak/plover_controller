@@ -687,22 +687,24 @@ class StickWidget(QWidget):
             )
 
         painter = QPainter(self)
-        width = painter.device().width()
-        height = painter.device().height()
+        dev = painter.device()
+        assert dev is not None
+        width = dev.width()
+        height = dev.height()
         x = self.state._stick_states.get(self.stick.x_axis, 0.0)
         y = self.state._stick_states.get(self.stick.y_axis, 0.0)
         painter.drawLine(QLineF(convx(0), convy(0), convx(x), convy(y)))
 
-        painter.setPen(QPen(Qt.lightGray, 1, Qt.DotLine))
+        painter.setPen(QPen(Qt.GlobalColor.lightGray, 1, Qt.PenStyle.DotLine))
         draw_deadzone(self.state._params["stroke_end_threshold"] * sqrt(2))
-        painter.setPen(QPen(Qt.darkGray, 1, Qt.DotLine))
+        painter.setPen(QPen(Qt.GlobalColor.darkGray, 1, Qt.PenStyle.DotLine))
         draw_deadzone(self.state._params["stick_dead_zone"] * sqrt(2))
 
         angle = self.stick.offset / 360 * tau - tau / 4
         step = tau / len(self.stick.segments)
         for segment in self.stick.segments:
             x, y = -sin(angle), cos(angle)
-            painter.setPen(QPen(Qt.black, 1, Qt.DotLine))
+            painter.setPen(QPen(Qt.GlobalColor.black, 1, Qt.PenStyle.DotLine))
             painter.drawLine(QLineF(convx(0), convy(0), convx(x), convy(y)))
 
             font_metrics = painter.fontMetrics()
@@ -713,8 +715,8 @@ class StickWidget(QWidget):
                 -sin(angle + step / 2) * 0.9 - text_width / 2,
                 cos(angle + step / 2) * 0.9 + text_height / 2,
             )
-            painter.setPen(QPen(Qt.black, 1, Qt.SolidLine))
-            painter.setBrush(QBrush(Qt.black))
+            painter.setPen(QPen(Qt.GlobalColor.black, 1, Qt.PenStyle.SolidLine))
+            painter.setBrush(QBrush(Qt.GlobalColor.black))
             painter.setFont(QFont("Arial", 12))
             painter.drawText(QPointF(convx(midx), convy(midy)), segment)
 
