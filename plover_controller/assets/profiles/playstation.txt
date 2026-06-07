@@ -1,40 +1,35 @@
 left stick has segments (dr,d,dl,ul,u,ur) on axes 0 and 1 offset by 0 degrees
-right stick has segments (dr,d,dl,ul,u,ur) on axes 3 and 4 offset by 0 degrees
+right stick has segments (dr,d,dl,ul,u,ur) on axes 2 and 3 offset by 0 degrees
 
-trigger on axis 2 is lefttrigger
-trigger on axis 5 is righttrigger
+trigger on axis 4 is l2
+trigger on axis 5 is r2
 
 hat 0 is dpad
 
-button 0 is a
-button 1 is b
-button 2 is x
-button 3 is y
-button 4 is leftshoulder
-button 5 is rightshoulder
-button 6 is back
-button 7 is start
-button 8 is guide
-button 9 is leftstick
-button 10 is rightstick
-button 11 is paddle1
-button 12 is paddle2
-button 13 is paddle3
-button 14 is paddle4
+button 0 is cross
+button 1 is circle
+button 2 is square
+button 3 is triangle
+button 4 is share
+button 5 is ps
+button 6 is options
+button 7 is l3
+button 8 is r3
+button 9 is l1
+button 10 is r1
 
-a -> -S
-b -> -Z
-x -> -T
-y -> -D
-back -> *
-// guide -> (often intercepted by Steam or the OS)
-start -> #
-leftstick -> S-
-rightstick -> *
-lefttrigger -> A-
-leftshoulder -> O-
-rightshoulder -> -E
-righttrigger -> -U
+cross -> -S
+circle -> -Z
+square -> -T
+triangle -> -D
+share -> *
+options -> #
+l3 -> S-
+r3 -> *
+l2 -> A-
+l1 -> O-
+r1 -> -E
+r2 -> -U
 dpadu,dpadd,dpadl,dpadr ->
 dpadu,dpadd,dpadl ->
 dpadu,dpadd,dpadr ->
@@ -50,11 +45,6 @@ dpadu -> KPA-
 dpadd -> HRO*-ER
 dpadl -> SKWH-
 dpadr -> SKP-
-paddle1 -> -E
-paddle2 -> -U
-paddle3 -> O-
-paddle4 -> A-
-// touchpad ->
 leftdr -> R-
 leftd -> W-
 leftdl -> K-

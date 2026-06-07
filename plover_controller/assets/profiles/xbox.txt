@@ -17,17 +17,12 @@ button 7 is start
 button 8 is guide
 button 9 is leftstick
 button 10 is rightstick
-button 11 is paddle1
-button 12 is paddle2
-button 13 is paddle3
-button 14 is paddle4
 
 a -> -S
 b -> -Z
 x -> -T
 y -> -D
 back -> *
-// guide -> (often intercepted by Steam or the OS)
 start -> #
 leftstick -> S-
 rightstick -> *
@@ -50,11 +45,6 @@ dpadu -> KPA-
 dpadd -> HRO*-ER
 dpadl -> SKWH-
 dpadr -> SKP-
-paddle1 -> -E
-paddle2 -> -U
-paddle3 -> O-
-paddle4 -> A-
-// touchpad ->
 leftdr -> R-
 leftd -> W-
 leftdl -> K-

@@ -1,6 +1,6 @@
 import re
 from dataclasses import dataclass
-from .util import get_keys_for_stroke
+from .util import get_keys_for_stroke, keys_to_stroke
 
 
 @dataclass
@@ -66,6 +66,9 @@ class Mappings:
                 lhs = match[1].split(",")
                 rhs = get_keys_for_stroke(match[2])
                 result.unordered_mappings.append((lhs, rhs))
+            elif match := re.match(r"([a-z0-9,]+) ->\s*$", line):
+                lhs = match[1].split(",")
+                result.unordered_mappings.append((lhs, ()))
             elif match := re.match(r"(\w+)\(([a-z,]+)\) -> ([A-Z-*#]+)", line):
                 result.ordered_mappings[
                     tuple(f"{match[1]}{pos}" for pos in match[2].split(","))
@@ -91,3 +94,68 @@ class Mappings:
             else:
                 print(f"don't know how to parse '{line}', skipping")
         return result
+
+    def serialize(self) -> str:
+        lines: list[str] = []
+
+        for stick in self.sticks.values():
+            segs = ",".join(stick.segments)
+            x = stick.x_axis[1:]
+            y = stick.y_axis[1:]
+            offset = int(stick.offset) if stick.offset == int(stick.offset) else stick.offset
+            lines.append(
+                f"{stick.name} stick has segments ({segs}) on axes {x} and {y} offset by {offset} degrees"
+            )
+
+        if self.sticks and (self.triggers or self.hats or self.buttons):
+            lines.append("")
+
+        for alias in self.triggers.values():
+            lines.append(f"trigger on axis {alias.actual[1:]} is {alias.renamed}")
+
+        if self.triggers and (self.hats or self.buttons):
+            lines.append("")
+
+        for alias in self.hats.values():
+            lines.append(f"hat {alias.actual[1:]} is {alias.renamed}")
+
+        if self.hats and self.buttons:
+            lines.append("")
+
+        for alias in self.buttons.values():
+            lines.append(f"button {alias.actual[1:]} is {alias.renamed}")
+
+        if self.buttons and self.unordered_mappings:
+            lines.append("")
+
+        for lhs, rhs in self.unordered_mappings:
+            stroke = keys_to_stroke(rhs)
+            if stroke:
+                lines.append(f"{','.join(lhs)} -> {stroke}")
+            else:
+                lines.append(f"{','.join(lhs)} ->")
+
+        if self.unordered_mappings and self.ordered_mappings:
+            lines.append("")
+
+        for key_tuple, rhs in self.ordered_mappings.items():
+            if not key_tuple:
+                continue
+            first = key_tuple[0]
+            stick_name = ""
+            for s in self.sticks.values():
+                for seg in s.segments:
+                    prefix = s.name
+                    if first.startswith(prefix):
+                        stick_name = prefix
+                        break
+                if stick_name:
+                    break
+            if not stick_name:
+                stick_name = re.match(r"[a-z]+", first)
+                stick_name = stick_name.group(0) if stick_name else first
+            segments = ",".join(k[len(stick_name):] for k in key_tuple)
+            lines.append(f"{stick_name}({segments}) -> {keys_to_stroke(rhs)}")
+
+        lines.append("")
+        return "\n".join(lines)

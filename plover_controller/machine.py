@@ -26,29 +26,32 @@ from plover_controller.config import (
     Mappings,
 )
 from .util import stick_segment, buttons_to_keys
-from copy import copy
 from plover.engine import StenoEngine
 from plover.gui_qt.tool import Tool
 from plover.machine.base import StenotypeBase
 from plover.misc import boolean
 from plover.resource import resource_exists, resource_filename
-from PyQt5.QtCore import QVariant, pyqtSignal, Qt, QSize, QLineF, QPointF, QRectF
-from PyQt5.QtGui import QFont, QPainter, QPen, QBrush
 from typing import Any, Callable, Optional
-from PyQt5.QtWidgets import (
+from plover_controller.qt_compat import (
+    Signal,
+    Qt,
+    QSize,
+    QLineF,
+    QPointF,
+    QRectF,
+    QFont,
+    QPainter,
+    QPen,
+    QBrush,
     QWidget,
-    QCheckBox,
-    QDoubleSpinBox,
     QFormLayout,
-    QGroupBox,
     QLabel,
-    QPushButton,
-    QTextEdit,
     QVBoxLayout,
 )
 from sdl2 import (
     SDL_Event,
     SDL_free,
+    SDL_GameControllerOpen,
     SDL_GetError,
     SDL_HAT_CENTERED,
     SDL_HAT_DOWN,
@@ -65,9 +68,11 @@ from sdl2 import (
     SDL_HINT_JOYSTICK_RAWINPUT,
     SDL_HINT_JOYSTICK_THREAD,
     SDL_HINT_NO_SIGNAL_HANDLERS,
+    SDL_INIT_GAMECONTROLLER,
     SDL_INIT_JOYSTICK,
     SDL_INIT_VIDEO,
     SDL_Init,
+    SDL_IsGameController,
     SDL_JoystickOpen,
     SDL_NumJoysticks,
     SDL_PushEvent,
@@ -89,6 +94,30 @@ HAT_VALUES = {
     SDL_HAT_RIGHTDOWN: "dr",
     SDL_HAT_LEFTUP: "ul",
     SDL_HAT_LEFTDOWN: "dl",
+}
+
+CONTROLLER_BUTTON_NAMES = {
+    sdl2.SDL_CONTROLLER_BUTTON_A: "a",
+    sdl2.SDL_CONTROLLER_BUTTON_B: "b",
+    sdl2.SDL_CONTROLLER_BUTTON_X: "x",
+    sdl2.SDL_CONTROLLER_BUTTON_Y: "y",
+    sdl2.SDL_CONTROLLER_BUTTON_BACK: "back",
+    sdl2.SDL_CONTROLLER_BUTTON_GUIDE: "guide",
+    sdl2.SDL_CONTROLLER_BUTTON_START: "start",
+    sdl2.SDL_CONTROLLER_BUTTON_LEFTSTICK: "leftstick",
+    sdl2.SDL_CONTROLLER_BUTTON_RIGHTSTICK: "rightstick",
+    sdl2.SDL_CONTROLLER_BUTTON_LEFTSHOULDER: "leftshoulder",
+    sdl2.SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: "rightshoulder",
+    sdl2.SDL_CONTROLLER_BUTTON_DPAD_UP: "dpadu",
+    sdl2.SDL_CONTROLLER_BUTTON_DPAD_DOWN: "dpadd",
+    sdl2.SDL_CONTROLLER_BUTTON_DPAD_LEFT: "dpadl",
+    sdl2.SDL_CONTROLLER_BUTTON_DPAD_RIGHT: "dpadr",
+    sdl2.SDL_CONTROLLER_BUTTON_MISC1: "misc1",
+    sdl2.SDL_CONTROLLER_BUTTON_PADDLE1: "paddle1",
+    sdl2.SDL_CONTROLLER_BUTTON_PADDLE2: "paddle2",
+    sdl2.SDL_CONTROLLER_BUTTON_PADDLE3: "paddle3",
+    sdl2.SDL_CONTROLLER_BUTTON_PADDLE4: "paddle4",
+    sdl2.SDL_CONTROLLER_BUTTON_TOUCHPAD: "touchpad",
 }
 
 mapping_path = "asset:plover_controller:assets/default_mapping.txt"
@@ -142,6 +171,22 @@ class Event:
                 added=False,
                 which=ev.jdevice.which,
             )
+        elif ev.type == sdl2.SDL_CONTROLLERBUTTONDOWN:
+            name = CONTROLLER_BUTTON_NAMES.get(ev.cbutton.button)
+            if name is not None:
+                return ControllerButtonEvent(
+                    name=name,
+                    state=True,
+                    device=ev.cbutton.which,
+                )
+        elif ev.type == sdl2.SDL_CONTROLLERBUTTONUP:
+            name = CONTROLLER_BUTTON_NAMES.get(ev.cbutton.button)
+            if name is not None:
+                return ControllerButtonEvent(
+                    name=name,
+                    state=False,
+                    device=ev.cbutton.which,
+                )
 
 
 @dataclass
@@ -172,6 +217,13 @@ class ButtonEvent(Event):
 
 
 @dataclass
+class ControllerButtonEvent(Event):
+    name: str
+    state: bool
+    device: int
+
+
+@dataclass
 class DeviceEvent(Event):
     which: int
     added: bool
@@ -192,21 +244,30 @@ def get_controller_thread():
 class ControllerThread(threading.Thread):
     lock = threading.Lock()
     set_hint_event_type: Optional[int] = None
-    listeners: set[Callable[[Event], None]] = set()
+    rumble_event_type: Optional[int] = None
+    listeners: set[Callable[[Event], None]]
 
     def __init__(self):
-        super().__init__()
+        super().__init__(daemon=True)
+        self.listeners = set()
+        self._controllers = []
 
     def run(self):
         with self.lock:
             SDL_Quit()
             SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, b"1")
             SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, b"1")
-            SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK)
+            SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER)
             self.set_hint_event_type = SDL_RegisterEvents(1)
+            self.rumble_event_type = SDL_RegisterEvents(1)
 
             for i in range(typing.cast(int, SDL_NumJoysticks())):
-                SDL_JoystickOpen(i)
+                if SDL_IsGameController(i):
+                    gc = SDL_GameControllerOpen(i)
+                    if gc:
+                        self._controllers.append(gc)
+                else:
+                    SDL_JoystickOpen(i)
 
         event = SDL_Event()
         while True:
@@ -224,11 +285,18 @@ class ControllerThread(threading.Thread):
                     )
                     SDL_free(event.user.data1)
                     SDL_free(event.user.data2)
+                elif event.type == self.rumble_event_type:
+                    self._do_rumble()
                 else:
                     if converted_event := Event.from_sdl(event):
                         if isinstance(converted_event, DeviceEvent):
                             if converted_event.added:
-                                SDL_JoystickOpen(converted_event.which)
+                                if SDL_IsGameController(converted_event.which):
+                                    gc = SDL_GameControllerOpen(converted_event.which)
+                                    if gc:
+                                        self._controllers.append(gc)
+                                else:
+                                    SDL_JoystickOpen(converted_event.which)
                         for listener in self.listeners:
                             listener(converted_event)
 
@@ -248,36 +316,57 @@ class ControllerThread(threading.Thread):
             event.user.data2 = SDL_strdup_void(value)
             SDL_PushEvent(event)
 
+    def rumble(self, low=0x8000, high=0x4000, duration=80):
+        if self.rumble_event_type is None:
+            return
+        self._rumble_low = low
+        self._rumble_high = high
+        self._rumble_duration = duration
+        event = SDL_Event()
+        event.type = self.rumble_event_type
+        SDL_PushEvent(event)
+
+    def _do_rumble(self):
+        low = getattr(self, "_rumble_low", 0x8000)
+        high = getattr(self, "_rumble_high", 0x4000)
+        duration = getattr(self, "_rumble_duration", 80)
+        for gc in self._controllers:
+            try:
+                sdl2.SDL_GameControllerRumble(gc, low, high, duration)
+            except Exception:
+                pass
+
 
 class ControllerState:
-    # Machine settings
-    _params: dict[str, Any] = {}
-    # Parsed configuration file
-    _mappings: Mappings = Mappings.empty()
-    # Last received axis values for mapped sticks, keyed by a{int}
-    _stick_states: dict[str, float] = {}
-    # Last received axis values for mapped triggers, keyed by a{int}
-    _trigger_states: dict[str, float] = {}
-    # Last received values for hats, keyed by alias
-    _hat_states: dict[str, int] = {}
-    # Keys fully triggered by completed chords
-    _pending_keys: set[str] = set()
-    _pending_stick_movements: dict[str, list[str]] = {}
-    _pending_hat_values: dict[str, set[int]] = {}
-    _unsequenced_buttons_and_hats: set[str] = set()
-    # All buttons currently pressed
-    _currently_pressed_buttons: set[str] = set()
-    _currently_uncentered_hats: set[str] = set()
-    # Function called with stroke data when complete
+    _params: dict[str, Any]
+    _mappings: Mappings
+    _stick_states: dict[str, float]
+    _trigger_states: dict[str, float]
+    _hat_states: dict[str, int]
+    _pending_keys: set[str]
+    _pending_stick_movements: dict[str, list[str]]
+    _active_hat_cardinals: dict[str, set[str]]
+    _unsequenced_buttons_and_hats: set[str]
+    _currently_pressed_buttons: set[str]
+    _currently_uncentered_hats: set[str]
     _notify: Callable[[list[str]], None]
-    # Whether a stick was in the deadzone in the previous check
-    _fresh_from_deadzone: dict[str, bool] = {}
+    _fresh_from_deadzone: dict[str, bool]
 
     def __init__(self, params: dict[str, Any], notify: Callable[[list[str]], None]):
         super().__init__()
         self._params = params
         self._mappings = Mappings.parse(self._params["mapping"])
         self._notify = notify
+        self._stick_states = {}
+        self._trigger_states = {}
+        self._hat_states = {}
+        self._pending_keys = set()
+        self._pending_stick_movements = {}
+        self._active_hat_cardinals = {}
+        self._unsequenced_buttons_and_hats = set()
+        self._currently_pressed_buttons = set()
+        self._currently_uncentered_hats = set()
+        self._fresh_from_deadzone = {}
 
     def _handle_event(self, event: Event):
         if isinstance(event, AxisEvent):
@@ -286,6 +375,8 @@ class ControllerState:
             self._handle_ball_event(event)
         elif isinstance(event, HatEvent):
             self._handle_hat_event(event)
+        elif isinstance(event, ControllerButtonEvent):
+            self._handle_controller_button_event(event)
         elif isinstance(event, ButtonEvent):
             self._handle_button_event(event)
         elif isinstance(event, DeviceEvent):
@@ -313,13 +404,35 @@ class ControllerState:
         if hat_entry := self._mappings.hats.get(hat):
             hat = hat_entry.renamed
         self._hat_states[hat] = event.value
+
+        new_cardinals = set()
+        if event.value & SDL_HAT_UP:
+            new_cardinals.add(f"{hat}u")
+        if event.value & SDL_HAT_DOWN:
+            new_cardinals.add(f"{hat}d")
+        if event.value & SDL_HAT_LEFT:
+            new_cardinals.add(f"{hat}l")
+        if event.value & SDL_HAT_RIGHT:
+            new_cardinals.add(f"{hat}r")
+
+        old_cardinals = self._active_hat_cardinals.get(hat, set())
+
+        for cardinal in new_cardinals - old_cardinals:
+            self._currently_pressed_buttons.add(cardinal)
+            if cardinal not in self._unsequenced_buttons_and_hats:
+                self._unsequenced_buttons_and_hats.add(cardinal)
+
+        for cardinal in old_cardinals - new_cardinals:
+            self._currently_pressed_buttons.discard(cardinal)
+
+        self._active_hat_cardinals[hat] = new_cardinals
+
         if event.value == 0:
-            self.complete_hat(hat)
             self._currently_uncentered_hats.discard(hat)
-            self.maybe_complete_stroke()
         else:
             self._currently_uncentered_hats.add(hat)
-            self._pending_hat_values.setdefault(hat, set()).add(event.value)
+
+        self.maybe_complete_stroke()
 
     def _handle_button_event(self, event: ButtonEvent):
         button = f"b{event.button}"
@@ -333,26 +446,18 @@ class ControllerState:
             self._currently_pressed_buttons.discard(button)
             self.maybe_complete_stroke()
 
+    def _handle_controller_button_event(self, event: ControllerButtonEvent):
+        button = event.name
+        if event.state:
+            self._currently_pressed_buttons.add(button)
+            if button not in self._unsequenced_buttons_and_hats:
+                self._unsequenced_buttons_and_hats.add(button)
+        else:
+            self._currently_pressed_buttons.discard(button)
+            self.maybe_complete_stroke()
+
     def _handle_device_event(self, event: DeviceEvent):
         pass
-
-    def complete_hat(self, hat: str):
-        pending_values = self._pending_hat_values.get(hat, set())
-        if SDL_HAT_RIGHTUP in pending_values:
-            pending_values.discard(SDL_HAT_RIGHT)
-            pending_values.discard(SDL_HAT_UP)
-        if SDL_HAT_RIGHTDOWN in pending_values:
-            pending_values.discard(SDL_HAT_RIGHT)
-            pending_values.discard(SDL_HAT_DOWN)
-        if SDL_HAT_LEFTUP in pending_values:
-            pending_values.discard(SDL_HAT_LEFT)
-            pending_values.discard(SDL_HAT_UP)
-        if SDL_HAT_LEFTDOWN in pending_values:
-            pending_values.discard(SDL_HAT_LEFT)
-            pending_values.discard(SDL_HAT_DOWN)
-        for value in pending_values:
-            self._unsequenced_buttons_and_hats.add(f"{hat}{HAT_VALUES[value]}")
-        del self._pending_hat_values[hat]
 
     def any_active_inputs(self):
         return (
@@ -455,12 +560,27 @@ class ControllerMachine(StenotypeBase):
     """
 
     _state: ControllerState
+    _output_enabled: bool
 
     def __init__(self, params: dict[str, Any]):
         super().__init__()
+        self._output_enabled = False
         self._state = ControllerState(params, self._wrap_notify)
 
+    def set_suppression(self, enabled):
+        self._output_enabled = enabled
+
     def _wrap_notify(self, keys: list[str]):
+        from plover_controller.option_ui import is_steno_suppressed
+
+        if is_steno_suppressed():
+            return
+        if self._output_enabled and self._state._params.get("rumble_on_stroke", True):
+            p = self._state._params
+            low = int(p.get("rumble_low_freq", 0.5) * 0xFFFF)
+            high = int(p.get("rumble_high_freq", 0.25) * 0xFFFF)
+            duration = int(p.get("rumble_duration", 80))
+            get_controller_thread().rumble(low, high, duration)
         self._notify(self.keymap.keys_to_actions(keys))
 
     def start_capture(self):
@@ -486,6 +606,7 @@ class ControllerMachine(StenotypeBase):
     @classmethod
     def get_option_info(cls) -> dict[str, tuple[Any, Callable[[str], Any]]]:
         return {
+            "profile": ("", str),
             "mapping": (DEFAULT_MAPPING, str),
             "timeout": (1.0, float),
             "stick_dead_zone": (0.6, float),
@@ -495,166 +616,14 @@ class ControllerMachine(StenotypeBase):
             "use_rawinput": (False, boolean),
             "correlate_rawinput": (False, boolean),
             "use_joystick_thread": (False, boolean),
+            "rumble_on_stroke": (True, boolean),
+            "rumble_duration": (80, int),
+            "rumble_low_freq": (0.5, float),
+            "rumble_high_freq": (0.25, float),
+            "display_chroma_color": ("#00b140", str),
+            "display_layout": ("horizontal", str),
+            "display_show_back": (True, boolean),
         }
-
-
-class ControllerOption(QGroupBox):
-    axis_message = pyqtSignal(str)
-    other_message = pyqtSignal(str)
-    valueChanged = pyqtSignal(QVariant)
-    _value = {}
-    _last_axis_message = None
-    _last_other_message = None
-    _spin_boxes = {}
-    _check_boxes = {}
-
-    SPIN_BOXES = {
-        "timeout": "Timeout:",
-        "stick_dead_zone": "Stick dead zone:",
-        "trigger_dead_zone": "Trigger dead zone:",
-        "stroke_end_threshold": "Stroke end threshold:",
-    }
-
-    CHECK_BOXES = {
-        "use_hidapi": "Use hidapi drivers:\n(reconnect controller and/or restart after change)",
-        "use_rawinput": "Use rawinput drivers:\n(reconnect controller and/or restart after change)",
-        "correlate_rawinput": "Correlate rawinput and xinput data:\n(reconnect controller and/or restart after change)",
-        "use_joystick_thread": "Use joystick thread:\n(restart after change)",
-    }
-
-    def __init__(self):
-        super().__init__()
-        self.valueChanged.connect(self.setValue)
-
-        self._form_layout = QFormLayout(self)
-
-        for property, description in __class__.SPIN_BOXES.items():
-
-            def value_changed(value, property=property):
-                if value == self._value.get(property):
-                    return
-                self._value[property] = value
-                self.valueChanged.emit(self._value)
-
-            label = QLabel(description, self)
-            spin_box = QDoubleSpinBox(self)
-            spin_box.setSingleStep(0.1)
-            spin_box.valueChanged.connect(value_changed)
-            self._form_layout.addRow(label, spin_box)
-            self._spin_boxes[property] = spin_box
-
-        for property, description in __class__.CHECK_BOXES.items():
-
-            def state_changed(state, property=property):
-                value = state == Qt.CheckState.Checked
-                if value == self._value.get(property):
-                    return
-                self._value[property] = value
-                self.valueChanged.emit(self._value)
-
-            label = QLabel(description, self)
-            check_box = QCheckBox(self)
-            check_box.stateChanged.connect(state_changed)
-            self._form_layout.addRow(label, check_box)
-            self._check_boxes[property] = check_box
-
-        self._mapping_label = QLabel("Mapping:", self)
-        self._mapping_text_edit = QTextEdit(self)
-        self._mapping_text_edit.setFont(QFont("Monospace"))
-        self._mapping_text_edit.textChanged.connect(self.mapping_changed)
-        self._mapping_reset_button = QPushButton("Reset mapping to default", self)
-        self._mapping_reset_button.clicked.connect(self.reset_mapping)
-        self._mapping_layout = QVBoxLayout()
-        self._mapping_layout.addWidget(self._mapping_text_edit)
-        self._mapping_layout.addWidget(self._mapping_reset_button)
-        self._form_layout.addRow(self._mapping_label, self._mapping_layout)
-
-        self._axis_feedback_label = QLabel("Last axis event:", self)
-        self._axis_feedback_output_label = QLabel(self)
-        self._axis_feedback_output_label.setFont(QFont("Monospace"))
-        self._form_layout.addRow(
-            self._axis_feedback_label, self._axis_feedback_output_label
-        )
-        self.axis_message.connect(self._axis_feedback_output_label.setText)
-
-        self._feedback_label = QLabel("Last other event:", self)
-        self._feedback_output_label = QLabel(self)
-        self._feedback_output_label.setFont(QFont("Monospace"))
-        self._form_layout.addRow(self._feedback_label, self._feedback_output_label)
-        self.other_message.connect(self._feedback_output_label.setText)
-
-        get_controller_thread().add_listener(self._handle_event)
-
-        def handle_destroy():
-            get_controller_thread().remove_listener(self._handle_event)
-
-        self.destroyed.connect(handle_destroy)
-
-    def _handle_event(self, ev: Event):
-        if isinstance(ev, AxisEvent):
-            if ev.value < 0.25:
-                return
-            message = f"Axis {ev.axis} motion (device: {ev.device})"
-            if message != self._last_axis_message:
-                try:
-                    self.axis_message.emit(message)
-                except RuntimeError:
-                    pass
-            self._last_axis_message = message
-            return
-
-        elif isinstance(ev, BallEvent):
-            message = f"Ball {ev.ball} motion (device: {ev.device})"
-
-        elif isinstance(ev, HatEvent):
-            if ev.value == 0:
-                message = f"Hat {ev.hat} centered (device: {ev.device})"
-            else:
-                message = (
-                    f"Hat {ev.hat} event {HAT_VALUES[ev.value]} (device: {ev.device})"
-                )
-
-        elif isinstance(ev, ButtonEvent):
-            message = f"Button {ev.button} {'pressed' if ev.state else 'released'} (device: {ev.device})"
-
-        elif isinstance(ev, DeviceEvent):
-            message = f"Device {ev.which} {'added' if ev.added else 'removed'}"
-
-        else:
-            return
-
-        if message != self._last_other_message:
-            try:
-                self.other_message.emit(message)
-            except RuntimeError:
-                pass
-        self._last_other_message = message
-
-    def setValue(self, value):
-        self._value = copy(value)
-        for property in __class__.SPIN_BOXES.keys():
-            if property in value:
-                self._spin_boxes[property].setValue(value[property])
-        for property in __class__.CHECK_BOXES.keys():
-            if property in value:
-                if value[property] == True:
-                    self._check_boxes[property].setCheckState(Qt.CheckState.Checked)
-                else:
-                    self._check_boxes[property].setCheckState(Qt.CheckState.Unchecked)
-        if (mapping := value.get("mapping")) is not None:
-            existing = self._mapping_text_edit.toPlainText()
-            if mapping != existing:
-                self._mapping_text_edit.setPlainText(mapping)
-
-    def mapping_changed(self):
-        text = self._mapping_text_edit.toPlainText()
-        if text == self._value.get("mapping"):
-            return
-        self._value["mapping"] = text
-        self.valueChanged.emit(self._value)
-
-    def reset_mapping(self):
-        self._mapping_text_edit.setPlainText(DEFAULT_MAPPING)
 
 
 class StickWidget(QWidget):
@@ -725,20 +694,23 @@ class StickWidget(QWidget):
 
 class ControllerDisplayTool(Tool):
     TITLE = "Controller Display"
-    ICON = ""
+    ICON = typing.cast(str, resource_filename("asset:plover_controller:assets/controller_display.svg"))
     ROLE = "controller_display_tool"
 
-    events = pyqtSignal(Event)
-
-    _state: ControllerState
-    _sticks: dict[str, StickWidget] = {}
-    _dying: bool = False
+    events = Signal(Event)
 
     def __init__(self, engine: StenoEngine):
         super().__init__(engine)
+        self._dying = False
+
+        from plover_controller.display import ControllerView
+
+        self._view = ControllerView(self)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self._view)
 
         self.events.connect(self._handle_event_signal)
-        self._layout = QFormLayout(self)
         self._engine.signal_connect("config_changed", self._handle_config_changed)
         self._handle_config_changed(None)
 
@@ -748,33 +720,22 @@ class ControllerDisplayTool(Tool):
             get_controller_thread().remove_listener(self._handle_event)
 
         self.destroyed.connect(handle_destroy)
+        self.resize(800, 400)
 
     def _handle_config_changed(self, _: Any):
         if self._dying:
             return
         if self._engine.config["machine_type"] != "Controller":
-            self._sticks.clear()
             return
         params = self._engine.config["machine_specific_options"]
-        self._state = ControllerState(params, self._ignore_notify)
-        self._sticks.clear()
-        for stick in self._state._mappings.sticks.values():
-            widget = StickWidget(self)
-            widget.stick = stick
-            widget.state = self._state
-            self._sticks[stick.name] = widget
-            self._layout.addRow(QLabel(f"Stick {stick.name}", self), widget)
-
-    def _ignore_notify(self, _: list[str]):
-        pass
-
-    def _make_stick_widget(self, stick: Stick):
-        pass
+        mappings = Mappings.parse(params["mapping"])
+        self._view.set_mappings(mappings, params)
+        self._view.set_chroma_color(params.get("display_chroma_color", "#00b140"))
+        self._view.set_layout_mode(params.get("display_layout", "horizontal"))
+        self._view.set_show_back(params.get("display_show_back", True))
 
     def _handle_event(self, event: Event):
         self.events.emit(event)
 
     def _handle_event_signal(self, event: Event):
-        self._state._handle_event(event)
-        if not self._dying:
-            self.update()
+        self._view.handle_event(event)
